@@ -1,0 +1,59 @@
+{
+  "name": "timefrontiers/php-mailer",
+  "description": "Email sending, templating, mailing lists, and delivery queuing for the TimeFrontiers ecosystem",
+  "keywords": ["php", "timefrontiers", "mailer", "email", "mailgun", "smtp", "template", "mailing-list"],
+  "homepage": "https://github.com/timefrontiers/php-mailer",
+  "type": "library",
+  "license": "MIT",
+  "authors": [
+    {
+      "name": "Ikechukwu Okalia",
+      "email": "consult@ikechukwuokalia.dev",
+      "homepage": "https://ikechukwuokalia.dev",
+      "role": "developer"
+    },
+    {
+      "name": "Time Frontiers Ltd",
+      "email": "git@timefrontiers.com",
+      "homepage": "https://git.timefrontiers.com",
+      "role": "developer"
+    }
+  ],
+  "require": {
+    "php": ">=8.2",
+    "timefrontiers/php-data": "^1.0",
+    "timefrontiers/php-sql-database": "^1.0",
+    "timefrontiers/php-database-object": "^1.0",
+    "timefrontiers/php-multiform": "^1.0",
+    "timefrontiers/php-pagination": "^1.0",
+    "timefrontiers/php-instance-error": "^1.0",
+    "timefrontiers/php-has-errors": "^1.0",
+    "timefrontiers/php-validator": "^1.0",
+    "timefrontiers/php-file": "^1.0",
+    "symfony/mailer": "^7.0",
+    "symfony/mailgun-mailer": "^7.0",
+    "symfony/http-client": "^7.0",
+    "league/commonmark": "^2.5"
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^10.0",
+    "phpstan/phpstan": "^1.10"
+  },
+  "autoload": {
+    "psr-4": {
+      "TimeFrontiers\\Mailer\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "TimeFrontiers\\Mailer\\Tests\\": "tests/"
+    }
+  },
+  "scripts": {
+    "test": "phpunit",
+    "analyse": "phpstan analyse src --level=8"
+  },
+  "config": {
+    "sort-packages": true
+  }
+}
