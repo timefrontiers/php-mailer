@@ -87,7 +87,21 @@ final class MailgunDriver implements MailDriverInterface
       ->text($bodyText);
 
     foreach ($headers as $name => $value) {
-      $email->getHeaders()->addTextHeader((string) $name, (string) $value);
+      $addresses = is_array($value) ? $value : [$value];
+      switch (strtolower((string) $name)) {
+        case 'cc':
+          $email->addCc(...array_map(fn($a) => Address::create((string) $a), $addresses));
+          break;
+        case 'bcc':
+          $email->addBcc(...array_map(fn($a) => Address::create((string) $a), $addresses));
+          break;
+        case 'reply-to':
+          $email->replyTo(...array_map(fn($a) => Address::create((string) $a), $addresses));
+          break;
+        default:
+          $headerValue = implode(', ', $addresses);
+          $email->getHeaders()->addTextHeader((string) $name, $headerValue);
+      }
     }
 
     foreach ($attachments as $att) {
