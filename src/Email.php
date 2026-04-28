@@ -108,19 +108,19 @@ class Email
     SQLDatabase $conn,
     string      $subject,
     string      $body,
-    string      $user,
+    string      $user = "SYSTEM",
     bool        $isMd       = false,
     ?int        $templateId = null,
   ): self {
     $instance = new self($conn);
 
     $instance->subject = Validator::field('subject', $subject)->text(min: 2, max: 255)->value()
-      ?: throw new ValidationException("Email subject must be 2–255 characters.");
+      ?: throw new ValidationException("Email subject must be 2-255 characters.");
 
     $instance->body = Validator::field('body', $body)->html(min: 1, max: 0)->value()
       ?: throw new ValidationException("Email body must not be empty.");
 
-    $instance->user = Validator::field('user', $user)->pattern('/^[A-Z0-9]{14,16}$/')->value()
+    $instance->user = Validator::field('user', $user)->pattern('/^(SYSTEM|([A-Z0-9]{14,16}))$/')->value()
       ?: throw new ValidationException("Invalid user code format.");
 
     $instance->is_md       = $isMd;
@@ -165,7 +165,7 @@ class Email
   {
     $valid = Validator::field('subject', $subject)->text(min: 2, max: 255)->value();
     if ($valid === false) {
-      throw new ValidationException("Email subject must be 2–255 characters.");
+      throw new ValidationException("Email subject must be 2-255 characters.");
     }
     $this->subject = $valid;
     $this->save();
@@ -421,7 +421,7 @@ class Email
    *
    * @param SQLDatabase $conn      Database connection.
    * @param Profile     $sender    The From profile.
-   * @param int         $priority  Delivery priority 1 (high) – 10 (low).
+   * @param int         $priority  Delivery priority 1 (high) - 10 (low).
    * @return bool  True if the email was successfully moved to OUTBOX.
    */
   public function queue(
