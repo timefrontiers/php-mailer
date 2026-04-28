@@ -22,6 +22,7 @@
   "require": {
     "php": ">=8.2",
     "timefrontiers/php-data": "^1.0",
+    "timefrontiers/php-core": "^1.0",
     "timefrontiers/php-sql-database": "^1.0",
     "timefrontiers/php-database-object": "^1.0",
     "timefrontiers/php-multiform": "^1.0",

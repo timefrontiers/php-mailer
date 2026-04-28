@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace TimeFrontiers\Mailer\Email;
 
-use TimeFrontiers\SQLDatabase;
+use TimeFrontiers\{SQLDatabase, Str};
 use TimeFrontiers\Validation\Validator;
 use TimeFrontiers\Mailer\Config;
 use TimeFrontiers\Mailer\RecipientType;
@@ -166,6 +166,13 @@ class Recipient
   private function _normaliseContact(string|array $contact): array
   {
     if (is_array($contact)) {
+      $address = Validator::field('email', $contact['email'] ?? '')->email()->value();
+      if ($address === false) {
+        throw new ValidationException("Contact array missing valid [email] key.");
+      }
+      $name    = Validator::field('name',    $contact['name']    ?? '')->name()->value() ?: null;
+      $surname = Validator::field('surname', $contact['surname'] ?? '')->name()->value() ?: null;
+    } else if ($contact = Str::parseEmailName($contact)) {
       $address = Validator::field('email', $contact['email'] ?? '')->email()->value();
       if ($address === false) {
         throw new ValidationException("Contact array missing valid [email] key.");
