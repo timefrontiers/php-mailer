@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS `emails` (
   `subject`     VARCHAR(255)    NOT NULL,
   `body`        MEDIUMTEXT      NOT NULL,
   `is_md`       TINYINT(1)      NOT NULL DEFAULT 0,
-  `folder`      ENUM('DRAFT','OUTBOX','SENT') NOT NULL DEFAULT 'DRAFT',
+  `folder`      ENUM('draft','outbox','sent') NOT NULL DEFAULT 'draft',
   `sender_id`   BIGINT UNSIGNED          DEFAULT NULL,
   `_author`     VARCHAR(320)             DEFAULT NULL,
   `_created`    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -202,7 +202,48 @@ CREATE TABLE IF NOT EXISTS `email_log` (
     FOREIGN KEY (`sender_id`) REFERENCES `mailer_profiles` (`id`)
     ON DELETE SET NULL ON UPDATE CASCADE,
 
+
   CONSTRAINT `fk_email_log_recipient_id`
     FOREIGN KEY (`recipient_id`) REFERENCES `email_recipients` (`id`)
     ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
+-- -----------------------------------------------------------------------------
+-- email_queue
+-- Bulk-email queue for personalized batch sending (newsletters, campaigns).
+--
+-- body stores the template-rendered shell with %{body} already substituted
+-- but per-recipient %{token} placeholders still intact for dispatch-time
+-- replacement. recipients is a JSON array:
+--   [{"contact": "Name <email>", "replaceValues": {"user-name": "John"}}, …]
+--
+-- status lifecycle: pending → processing → sent | failed
+-- Processed by Email\Queue::processNext() or Queue::dispatch().
+-- NOTE: FK on sender_id is added below via ALTER TABLE so this statement
+--       can succeed even when run in isolation (mailer_profiles must exist
+--       before the ALTER TABLE is executed).
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `email_queue` (
+  `id`         BIGINT UNSIGNED  NOT NULL AUTO_INCREMENT,
+  `status`     ENUM('pending','processing','sent','failed')
+                                NOT NULL DEFAULT 'pending',
+  `sender_id`  BIGINT UNSIGNED  NOT NULL,
+  `subject`    VARCHAR(255)     NOT NULL,
+  `body`       MEDIUMTEXT       NOT NULL,
+  `recipients` JSON             NOT NULL,
+  `driver`     VARCHAR(64)               DEFAULT NULL,
+  `_created`   DATETIME         NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `_updated`   DATETIME         NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+  PRIMARY KEY (`id`),
+  KEY `idx_email_queue_status`    (`status`),
+  KEY `idx_email_queue_sender_id` (`sender_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Add FK separately — mailer_profiles must exist before running this line.
+ALTER TABLE `email_queue`
+  ADD CONSTRAINT `fk_email_queue_sender_id`
+    FOREIGN KEY (`sender_id`) REFERENCES `mailer_profiles` (`id`)
+    ON DELETE RESTRICT ON UPDATE CASCADE;
+

@@ -30,7 +30,7 @@ class Template
 
   public const CODE_PREFIX  = '429';
   public const CODE_LENGTH  = 15;
-  public const CODE_PATTERN = '/^429\d{12}$/';
+  public const CODE_PATTERN = '/^429\d{8,12}$/';
 
   protected static string $_primary_key = 'id';
   protected static string $_db_name     = '';
@@ -84,7 +84,7 @@ class Template
     $instance = new self($conn);
 
     $instance->title = Validator::field('title', $title)->text(min: 5, max: 128)->value()
-      ?: throw new ValidationException("Template title must be 5–128 characters.");
+      ?: throw new ValidationException("Template title must be 5-128 characters.");
 
     $instance->body = Validator::field('body', $body)->html(min: 56, max: 0)->value()
       ?: throw new ValidationException("Template body is too short (min 56 characters).");
@@ -172,7 +172,12 @@ class Template
     $instance = new static();
     foreach ($row as $key => $value) {
       if (!is_int($key) && property_exists($instance, $key)) {
-        $instance->$key = $value;
+        // MySQL returns TINYINT(1) booleans as int — cast to the correct type
+        $instance->$key = match ($key) {
+          'is_md' => (bool)$value,
+          'id'    => $value !== null ? (int)$value : null,
+          default => $value,
+        };
       }
     }
     return $instance;

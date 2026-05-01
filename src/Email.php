@@ -77,8 +77,27 @@ class Email
   /** @var Attachment[] In-memory attachments (populated at runtime, not from DB). */
   private array $_attachments = [];
 
-  /** @var array<string, string> Token replacements applied during render. */
+  /** @var array<string, string> Token replacements applied during render (bare keys). */
   private array $_replacements = [];
+
+  // -------------------------------------------------------------------------
+  // Runtime-only state (not persisted to DB)
+  // -------------------------------------------------------------------------
+
+  /** In-memory template — authoritative over template_id DB lookup when set. */
+  private ?Template             $_template = null;
+
+  /** Sender profile stored at make() time — used by send() without params. */
+  private ?Profile              $_sender   = null;
+
+  /** Driver config stored at make() time — used by send() without params. */
+  private ?DriverConfigInterface $_driver  = null;
+
+  /** When false, body is saved to DB as ***redacted*** but rendered correctly. */
+  private bool                  $_log_body = true;
+
+  /** Holds the actual body content when $_log_body = false. */
+  private ?string               $_raw_body = null;
 
   // -------------------------------------------------------------------------
   // Boot
@@ -102,31 +121,89 @@ class Email
   /**
    * Create and persist a new email in DRAFT state.
    *
-   * @throws ValidationException on bad input.
+   * @param Profile                  $sender        The From profile — stored for send().
+   * @param string                   $message_type  Config::templates key for template + replaceVars lookup.
+   * @param int|string|Template|null $template      Explicit template override (overrides config lookup). null = use config.
+   * @param DriverConfigInterface|null $driver      Transport override. null = Config::get()->driver.
+   * @param bool                     $log_body      false → body saved as ***redacted*** in DB.
+   * @throws ValidationException|\RuntimeException
    */
   public static function make(
-    SQLDatabase $conn,
-    string      $subject,
-    string      $body,
-    string      $user = "SYSTEM",
-    bool        $isMd       = false,
-    ?int        $templateId = null,
+    SQLDatabase              $conn,
+    Profile                  $sender,
+    string                   $subject,
+    string                   $body,
+    string                   $user         = 'SYSTEM',
+    string                   $message_type = 'default',
+    int|string|Template|null $template     = null,
+    ?DriverConfigInterface   $driver       = null,
+    bool                     $log_body     = true,
   ): self {
     $instance = new self($conn);
 
     $instance->subject = Validator::field('subject', $subject)->text(min: 2, max: 255)->value()
       ?: throw new ValidationException("Email subject must be 2-255 characters.");
 
-    $instance->body = Validator::field('body', $body)->html(min: 1, max: 0)->value()
-      ?: throw new ValidationException("Email body must not be empty.");
+    $validBody = Validator::field('body', $body)->html(min: 1, max: 0)->value();
+    if ($validBody === false) {
+      throw new ValidationException("Email body must not be empty.");
+    }
 
     $instance->user = Validator::field('user', $user)->pattern('/^(SYSTEM|([A-Z0-9]{14,16}))$/')->value()
       ?: throw new ValidationException("Invalid user code format.");
 
-    $instance->is_md       = $isMd;
-    $instance->template_id = $templateId;
-    $instance->folder      = Folder::DRAFT->value;
-    $instance->code        = $instance->_generateCode();
+    // Keep actual body for rendering; optionally store redacted marker in DB
+    $instance->_raw_body = $validBody;
+    $instance->body      = $log_body ? $validBody : '***redacted***';
+    $instance->is_md     = false;
+    $instance->folder    = Folder::DRAFT->value;
+    $instance->code      = $instance->_generateCode();
+
+    // Store runtime state
+    $instance->_sender   = $sender;
+    $instance->sender_id = $sender->id;
+    $instance->_driver   = $driver ?? Config::get()->driver;
+    $instance->_log_body = $log_body;
+
+    // Resolve template
+    $configTpl = null;
+    if ($template !== null) {
+      if ($template instanceof Template) {
+        if (empty($template->id)) {
+          throw new ValidationException("Email::make() — invalid Template instance (no id).");
+        }
+        $instance->_template   = $template;
+        $instance->template_id = $template->id;
+      } else {
+        // int or string (code) — DatabaseObject::findById handles both
+        $tpl = Template::findById($template);
+        if (!$tpl) {
+          throw new ValidationException("Email::make() — template not found: {$template}");
+        }
+        $instance->_template   = $tpl;
+        $instance->template_id = $tpl->id;
+      }
+    } else {
+      // Soft lookup from Config by message_type — no exception on miss
+      try {
+        $configTpl = Config::get()->getTemplate($message_type);
+        if ($configTpl && !empty($configTpl['templateCode'])) {
+          $tpl = Template::findById($configTpl['templateCode']);
+          if ($tpl) {
+            $instance->_template   = $tpl;
+            $instance->template_id = $tpl->id;
+          }
+        }
+      } catch (\Throwable) {}
+    }
+
+    // Pre-populate _replacements from config replaceVars (bare keys, empty default values)
+    try {
+      $configTpl ??= Config::get()->getTemplate($message_type);
+      foreach ($configTpl['replaceVars'] ?? [] as $key) {
+        $instance->_replacements[$key] = '';
+      }
+    } catch (\Throwable) {}
 
     if (!$instance->save()) {
       throw new \RuntimeException("Email::make() — failed to persist email.");
@@ -135,6 +212,7 @@ class Email
     $instance->id = (int) $instance->conn()->insertId();
     return $instance;
   }
+
 
   /**
    * Load an email by its public code.
@@ -191,10 +269,12 @@ class Email
 
   /**
    * Bind (or unbind) a persisted template.
+   * Also updates the in-memory $_template cache.
    * Pass null to detach any current template.
    */
   public function setTemplate(?Template $template): self
   {
+    $this->_template   = $template;
     $this->template_id = $template?->id;
     $this->save();
     return $this;
@@ -218,12 +298,12 @@ class Email
 
   /**
    * Find-or-create a persisted recipient tied to this email.
+   * Uses the internally stored connection — no $conn argument needed.
    *
    * @param string|array{email?: string, name?: string, surname?: string} $contact
    * @throws \RuntimeException if the email has not yet been persisted (id is null).
    */
   public function addRecipient(
-    SQLDatabase   $conn,
     string|array  $contact,
     RecipientType $type    = RecipientType::TO,
     ?int          $mlistId = null,
@@ -231,7 +311,7 @@ class Email
     if ($this->id === null) {
       throw new \RuntimeException("Email::addRecipient() — email must be persisted before adding recipients.");
     }
-    return Recipient::forEmail($conn, $this->id, $contact, $type, $mlistId);
+    return Recipient::forEmail($this->conn(), $this->id, $contact, $type, $mlistId);
   }
 
   /**
@@ -287,37 +367,40 @@ class Email
    * Render the final HTML body.
    *
    * Pipeline:
-   *   1. Start with $this->body (HTML entity-decoded).
+   *   1. Use $_raw_body if set (when log_body = false), else $this->body.
    *   2. Convert Markdown → HTML if is_md is true.
-   *   3. Inject into the bound template via %{body} (if template_id is set).
-   *   4. Apply all registered token replacements.
+   *   3. Lazy-load template from template_id into $_template if not already set.
+   *   4. Inject into template via %{body} / %{message} (legacy compat).
+   *   5. Apply registered bare-key token replacements.
    */
   public function render(): string
   {
-    if (empty($this->body)) {
+    $rawBody = $this->_raw_body ?? $this->body;
+    if (empty($rawBody)) {
       return '';
     }
 
-    $html = html_entity_decode($this->body);
+    $html = html_entity_decode($rawBody);
 
     if ($this->is_md) {
       $converter = new CommonMarkConverter(['html_input' => 'allow']);
       $html      = (string) $converter->convert($html);
     }
 
-    if ($this->template_id !== null && $this->conn() !== null) {
-      $tpl = Template::findBySql(
-        'SELECT * FROM :db:.:tbl: WHERE `id` = ? LIMIT 1',
-        [$this->template_id],
-      );
-      if ($tpl) {
-        $shell = $tpl[0]->render();
-        $html  = str_replace('%{body}', $html, $shell);
-      }
+    // Lazy-load template from template_id if not already in memory
+    if ($this->_template === null && $this->template_id !== null) {
+      $this->_template = Template::findById($this->template_id);
+    }
+
+    if ($this->_template !== null) {
+      $shell = $this->_template->render();
+      // Support both %{body} (new) and %{message} (legacy templates)
+      $html  = str_replace(['%{body}', '%{message}'], $html, $shell);
     }
 
     return $this->_applyReplacements($html);
   }
+
 
   /**
    * Render a plain-text fallback, stripping HTML tags.
@@ -339,51 +422,57 @@ class Email
   // -------------------------------------------------------------------------
 
   /**
-   * Send the email immediately to all TO/CC/BCC recipients.
+   * Send the email immediately to all persisted TO recipients.
    *
-   * The driver is instantiated fresh for each call via DriverFactory so that
-   * different emails can use different transport configurations.
+   * Uses the sender and driver stored at make() time — no $conn/$sender/$driver params.
+   * $replace_values are merged on top of the config-seeded _replacements (per-call wins).
+   * Subject and body are rendered as local copies — $this->subject / $this->body unchanged.
    *
-   * Each TO recipient gets its own driver call (for per-recipient tracking).
-   * CC and BCC addresses are included as headers on every TO send.
-   *
-   * @param SQLDatabase           $conn         Database connection (for log writes).
-   * @param Profile               $sender        The From profile.
-   * @param DriverConfigInterface $driverConfig  Transport config to use.
-   * @return bool  True if every recipient was dispatched without exception.
+   * @param array $replace_values  Bare-key map, e.g. ['user-name' => 'John', 'user-surname' => 'Doe'].
+   * @return bool  True if every TO recipient was dispatched without exception.
    */
-  public function send(
-    SQLDatabase           $conn,
-    Profile               $sender,
-    DriverConfigInterface $driverConfig,
-  ): bool {
+  public function send(array $replace_values = []): bool
+  {
     if ($this->id === null) {
       throw new \RuntimeException("Email::send() — email must be persisted before sending.");
     }
-
     if (empty($this->subject)) {
       throw new MailerException("Email::send() — subject is empty.");
     }
+    if ($this->_sender === null) {
+      throw new MailerException("Email::send() — no sender set. Use Email::make() with a Profile.");
+    }
+    if ($this->_driver === null) {
+      throw new MailerException("Email::send() — no driver configured.");
+    }
 
-    // Store sender reference
+    $sender = $this->_sender;
+    $driver = DriverFactory::fromConfig($this->_driver);
+
+    // Merge per-call values on top of config-seeded defaults (per-call wins)
+    $replacements = $this->_replacements;
+    foreach ($replace_values as $key => $value) {
+      $replacements[$key] = $value;
+    }
+
+    // Render personalized body + subject as LOCAL copies — never mutates stored fields
+    $bodyHtml = $this->_renderWithReplacements($replacements);
+    $bodyText = $this->renderPlainText();
+    $subject  = $this->_applyReplacementsToString($this->subject ?? '', $replacements);
+
+    // Update sender reference on record
     $this->sender_id = $sender->id;
     $this->save();
 
-    $driver    = DriverFactory::fromConfig($driverConfig);
-    $bodyHtml  = $this->render();
-    $bodyText  = $this->renderPlainText();
-    $subject   = $this->_applyReplacements($this->subject ?? '');
+    // Shared headers (CC / BCC / Reply-To from persisted recipients)
+    $headers = $this->_buildSharedHeaders($this->conn());
 
-    // Collect CC / BCC / Reply-To headers (shared across all TO sends)
-    $headers = $this->_buildSharedHeaders($conn);
-
-    $toRecipients  = $this->getRecipients(RecipientType::TO);
+    $toRecipients = $this->getRecipients(RecipientType::TO);
     if (empty($toRecipients)) {
       throw new MailerException("Email::send() — no TO recipients.");
     }
 
-    // Persist attachment records (persisted only; transient are driver-only)
-    $this->_persistAttachments($conn);
+    $this->_persistAttachments($this->conn());
 
     $success = true;
     foreach ($toRecipients as $recipient) {
@@ -398,9 +487,10 @@ class Email
           attachments: $this->_attachments,
         );
 
-        $log = EmailLog::queue($conn, $this->id, (int) $sender->id, (int) $recipient->id);
+        $log = EmailLog::queue($this->conn(), $this->id, (int) $sender->id, (int) $recipient->id);
         $log->markSent($qref);
       } catch (\Throwable $e) {
+        $this->_addError('send', $e->getMessage(), 7);
         $success = false;
       }
     }
@@ -475,18 +565,58 @@ class Email
   // -------------------------------------------------------------------------
 
   /**
-   * Apply all registered token replacements to a string.
+   * Apply all registered bare-key replacements to a string.
+   * Keys are wrapped as %{key} at apply time.
    */
   private function _applyReplacements(string $text): string
   {
-    if (empty($this->_replacements)) {
+    return $this->_applyReplacementsToString($text, $this->_replacements);
+  }
+
+  /**
+   * Apply an explicit replacements array to a string.
+   * Used by send() so per-call values don't mutate $this->_replacements.
+   * Keys wrapped as %{key} at apply time.
+   */
+  private function _applyReplacementsToString(string $text, array $replacements): string
+  {
+    if (empty($replacements)) {
       return $text;
     }
-    return str_replace(
-      array_keys($this->_replacements),
-      array_values($this->_replacements),
-      $text,
-    );
+    $search  = array_map(fn($k) => '%{' . $k . '}', array_keys($replacements));
+    $replace = array_values($replacements);
+    return str_replace($search, $replace, $text);
+  }
+
+  /**
+   * Full render pipeline using an explicit replacements array.
+   * Safe to call in loops — never mutates $this->_replacements.
+   */
+  private function _renderWithReplacements(array $replacements): string
+  {
+    $rawBody = $this->_raw_body ?? $this->body;
+    if (empty($rawBody)) {
+      return '';
+    }
+
+    $html = html_entity_decode($rawBody);
+
+    if ($this->is_md) {
+      $converter = new CommonMarkConverter(['html_input' => 'allow']);
+      $html      = (string) $converter->convert($html);
+    }
+
+    // Lazy-load template from template_id if not already in memory
+    if ($this->_template === null && $this->template_id !== null) {
+      $this->_template = Template::findById($this->template_id);
+    }
+
+    if ($this->_template !== null) {
+      $shell = $this->_template->render();
+      $html  = str_replace(['%{body}', '%{message}'], $html, $shell);
+    }
+
+    return $this->_applyReplacementsToString($html, $replacements);
   }
 
   /**

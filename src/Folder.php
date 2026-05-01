@@ -9,9 +9,9 @@ namespace TimeFrontiers\Mailer;
  */
 enum Folder: string
 {
-  case DRAFT  = 'DRAFT';
-  case OUTBOX = 'OUTBOX';
-  case SENT   = 'SENT';
+  case DRAFT  = 'draft';
+  case OUTBOX = 'outbox';
+  case SENT   = 'sent';
 
   /** Returns true while the email content is still mutable. */
   public function isMutable(): bool

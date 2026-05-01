@@ -44,6 +44,18 @@ final class Config
      * May contain any %{…} tokens that the email's replace registry supports.
      */
     public readonly string $plainTextTemplate = 'Hello %{name}, if you cannot read the HTML version of this email you can view it online at %{server}/message/read/%{code}',
+    /**
+     * Template registry indexed by message_type.
+     * Format:
+     *   [
+     *     'default' => ['templateCode' => '42912345678', 'replaceVars' => ['user-name', 'user-surname']],
+     *     'order'   => ['templateCode' => '42999999999', 'replaceVars' => ['order-id', 'total']],
+     *   ]
+     * A null or missing templateCode means send with no template for that type.
+     *
+     * @var array<string, array{templateCode: string|null, replaceVars: string[]}>
+     */
+    public readonly array $templates = [],
   ) {}
 
   // -------------------------------------------------------------------------
@@ -71,6 +83,16 @@ final class Config
   public static function has(): bool
   {
     return self::$_instance !== null;
+  }
+
+  /**
+   * Return the template config entry for a given message type, or null if not found.
+   *
+   * @return array{templateCode: string|null, replaceVars: string[]}|null
+   */
+  public function getTemplate(string $type): ?array
+  {
+    return $this->templates[$type] ?? null;
   }
 
   /** Reset — intended for tests only. */
