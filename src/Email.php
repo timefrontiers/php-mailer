@@ -122,22 +122,23 @@ class Email
    * Create and persist a new email in DRAFT state.
    *
    * @param Profile                  $sender        The From profile — stored for send().
-   * @param string                   $message_type  Config::templates key for template + replaceVars lookup.
+   * @param ?string                  $message_type  Config::templates key for template + replaceVars lookup.
+   *                                               Pass null to skip Config template lookup entirely.
    * @param int|string|Template|null $template      Explicit template override (overrides config lookup). null = use config.
    * @param DriverConfigInterface|null $driver      Transport override. null = Config::get()->driver.
    * @param bool                     $log_body      false → body saved as ***redacted*** in DB.
    * @throws ValidationException|\RuntimeException
    */
   public static function make(
-    SQLDatabase              $conn,
-    Profile                  $sender,
-    string                   $subject,
-    string                   $body,
-    string                   $user         = 'SYSTEM',
-    string                   $message_type = 'default',
-    int|string|Template|null $template     = null,
-    ?DriverConfigInterface   $driver       = null,
-    bool                     $log_body     = true,
+    SQLDatabase               $conn,
+    Profile                   $sender,
+    string                    $subject,
+    string                    $body,
+    string                    $user         = 'SYSTEM',
+    ?string                   $message_type = 'default',
+    int|string|Template|null  $template     = null,
+    ?DriverConfigInterface    $driver       = null,
+    bool                      $log_body     = true,
   ): self {
     $instance = new self($conn);
 
@@ -164,6 +165,11 @@ class Email
     $instance->sender_id = $sender->id;
     $instance->_driver   = $driver ?? Config::get()->driver;
     $instance->_log_body = $log_body;
+
+    // Boot Template's static DB state so findById() can run queries.
+    // Template is a separate class — its $_db_name and static connection
+    // are only initialised when new Template($conn) is first called.
+    new Template($conn);
 
     // Resolve template
     $configTpl = null;
@@ -389,6 +395,7 @@ class Email
 
     // Lazy-load template from template_id if not already in memory
     if ($this->_template === null && $this->template_id !== null) {
+      new Template($this->conn());
       $this->_template = Template::findById($this->template_id);
     }
 
@@ -608,6 +615,7 @@ class Email
 
     // Lazy-load template from template_id if not already in memory
     if ($this->_template === null && $this->template_id !== null) {
+      new Template($this->conn());
       $this->_template = Template::findById($this->template_id);
     }
 

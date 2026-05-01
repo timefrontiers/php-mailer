@@ -111,7 +111,7 @@ Email::make(
     string                   $subject,
     string                   $body,
     string                   $user         = 'SYSTEM',
-    string                   $message_type = 'default',
+    ?string                  $message_type = 'default',
     int|string|Template|null $template     = null,
     ?DriverConfigInterface   $driver       = null,
     bool                     $log_body     = true,
@@ -121,7 +121,7 @@ Email::make(
 | Parameter | Description |
 |-----------|-------------|
 | `$sender` | `Profile` instance — the From address. |
-| `$message_type` | Used to look up `Config::templates` for template + token defaults. |
+| `$message_type` | Used to look up `Config::templates` for template + token defaults. Pass `null` to skip Config template lookup entirely (no template, no replaceVars seeding). |
 | `$template` | Explicit override: pass an `int` id, `string` code, or `Template` instance. `null` = use config lookup. |
 | `$driver` | Transport override. `null` = use `Config::get()->driver`. |
 | `$log_body` | `false` → body saved as `***redacted***` in DB (use for OTP / sensitive codes). Email is still delivered correctly. |
