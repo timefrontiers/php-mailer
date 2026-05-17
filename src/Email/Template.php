@@ -36,7 +36,7 @@ class Template
   protected static string $_db_name     = '';
   protected static string $_table_name  = 'email_templates';
   protected static array  $_db_fields   = [
-    'id', 'code', 'user', 'title', 'body', 'is_md', 'replace_keys', '_author', '_created', '_updated',
+    'id', 'code', 'user', 'title', 'body', 'is_md', '_author', '_created', '_updated',
   ];
 
   public ?int    $id    = null;
@@ -45,7 +45,6 @@ class Template
   public ?string $title = null;
   public ?string $body  = null;
   public bool    $is_md = false;
-  public ?array   $replace_keys = [];
 
   protected ?string $_author  = null;
   protected ?string $_created = null;
@@ -81,7 +80,6 @@ class Template
     string      $body,
     string      $user,
     bool        $isMd = false,
-    ?array       $replaceKeys = [],
   ): self {
     $instance = new self($conn);
 
@@ -91,12 +89,11 @@ class Template
     $instance->body = Validator::field('body', $body)->html(min: 56, max: 0)->value()
       ?: throw new ValidationException("Template body is too short (min 56 characters).");
 
-    $instance->user  = Validator::field('user', $user)->pattern('/^[A-Z0-9]{14,16}$/')->value()
+    $instance->user  = Validator::field('user', $user)->pattern('/^(SYSTEM|([0-9]{11,15}))$/')->value()
       ?: throw new ValidationException("Invalid user code format.");
 
-    $instance->is_md        = $isMd;
-    $instance->replace_keys = $replaceKeys;
-    $instance->code         = $instance->_generateCode();
+    $instance->is_md = $isMd;
+    $instance->code  = $instance->_generateCode();
 
     if (!$instance->save()) {
       throw new \RuntimeException("Template::make() — failed to persist template.");
@@ -158,15 +155,6 @@ class Template
   // Internal helpers
   // -------------------------------------------------------------------------
 
-  protected function _getSanitizedAttributes(): array
-  {
-    $attributes = self::_getSanitizedAttributes();
-    if (array_key_exists('replace_keys', $attributes)) {
-      $attributes['replace_keys'] = json_encode($this->replace_keys);
-    }
-    return $attributes;
-  }
-
   private function _generateCode(): string
   {
     do {
@@ -186,10 +174,9 @@ class Template
       if (!is_int($key) && property_exists($instance, $key)) {
         // MySQL returns TINYINT(1) booleans as int — cast to the correct type
         $instance->$key = match ($key) {
-          'is_md'        => (bool)$value,
-          'replace_keys' => !empty($value) ? (json_decode((string)$value, true) ?: []) : [],
-          'id'           => $value !== null ? (int)$value : null,
-          default        => $value,
+          'is_md' => (bool)$value,
+          'id'    => $value !== null ? (int)$value : null,
+          default => $value,
         };
       }
     }
