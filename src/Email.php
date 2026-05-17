@@ -545,6 +545,20 @@ class Email
     return true;
   }
 
+  /**
+   * Re-attach sender profile and optional driver after loading from DB.
+   *
+   * $_sender and $_driver are runtime-only — not persisted to the DB.
+   * Call this before send() on any Email instance loaded via findBySql() / findById().
+   * If $driver is null, falls back to Config::get()->driver.
+   */
+  public function withSender(Profile $sender, ?DriverConfigInterface $driver = null): self
+  {
+    $this->_sender = $sender;
+    $this->_driver = $driver ?? Config::get()->driver;
+    return $this;
+  }
+
   // -------------------------------------------------------------------------
   // Folder management
   // -------------------------------------------------------------------------
@@ -705,6 +719,14 @@ class Email
     $instance = new static();
     foreach ($row as $key => $value) {
       if (!is_int($key) && property_exists($instance, $key)) {
+        // MySQL returns TINYINT(1) as int; cast to bool for typed bool properties
+        try {
+          $rp   = new \ReflectionProperty($instance, $key);
+          $type = $rp->getType();
+          if ($type instanceof \ReflectionNamedType && $type->getName() === 'bool') {
+            $value = (bool)$value;
+          }
+        } catch (\ReflectionException) {}
         $instance->$key = $value;
       }
     }
