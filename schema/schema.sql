@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS `email_templates` (
   `user`     VARCHAR(16)     NOT NULL,
   `title`    VARCHAR(128)    NOT NULL,
   `body`     MEDIUMTEXT      NOT NULL,
-  `is_md`    TINYINT(1)      NOT NULL DEFAULT 0,
+  `is_md`    BOOLEAN         NOT NULL DEFAULT FALSE,
+  `replace_keys` JSON                 DEFAULT NULL
   `_author`  VARCHAR(320)             DEFAULT NULL,
   `_created` DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `_updated` DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
