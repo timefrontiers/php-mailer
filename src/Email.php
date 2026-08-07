@@ -49,7 +49,7 @@ class Email
 
   public const CODE_PREFIX  = '421';
   public const CODE_LENGTH  = 15;
-  public const CODE_PATTERN = '/^421\d{12}$/';
+  public const CODE_PATTERN = '/^421\d{8,12}$/';
 
   protected static string $_primary_key = 'id';
   protected static string $_db_name     = '';
@@ -150,7 +150,7 @@ class Email
       throw new ValidationException("Email body must not be empty.");
     }
 
-    $instance->user = Validator::field('user', $user)->pattern('/^(SYSTEM|([A-Z0-9]{14,16}))$/')->value()
+    $instance->user = Validator::field('user', $user)->pattern('/^(SYSTEM|087[0-9]{8,12})$/')->value()
       ?: throw new ValidationException("Invalid user code format.");
 
     // Keep actual body for rendering; optionally store redacted marker in DB

@@ -89,7 +89,7 @@ class Template
     $instance->body = Validator::field('body', $body)->html(min: 56, max: 0)->value()
       ?: throw new ValidationException("Template body is too short (min 56 characters).");
 
-    $instance->user  = Validator::field('user', $user)->pattern('/^(SYSTEM|([0-9]{11,15}))$/')->value()
+    $instance->user  = Validator::field('user', $user)->pattern('/^(SYSTEM|087[0-9]{8,12})$/')->value()
       ?: throw new ValidationException("Invalid user code format.");
 
     $instance->is_md = $isMd;

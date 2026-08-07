@@ -31,7 +31,7 @@ class MailingList
 
   public const CODE_PREFIX  = '218';
   public const CODE_LENGTH  = 15;
-  public const CODE_PATTERN = '/^218\d{12}$/';
+  public const CODE_PATTERN = '/^218\d{8,12}$/';
 
   protected static string $_primary_key = 'id';
   protected static string $_db_name     = '';
@@ -83,7 +83,7 @@ class MailingList
     $instance->name = Validator::field('name', $name)->text(min: 2, max: 128)->value()
       ?: throw new ValidationException("Mailing list name must be 2–128 characters.");
 
-    $instance->user = Validator::field('user', $user)->pattern('/^[A-Z0-9]{14,16}$/')->value()
+    $instance->user = Validator::field('user', $user)->pattern('/^(SYSTEM|087[0-9]{8,12})$/')->value()
       ?: throw new ValidationException("Invalid user code format.");
 
     $instance->code = $instance->_generateCode();

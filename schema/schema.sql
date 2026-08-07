@@ -36,19 +36,20 @@ CREATE TABLE IF NOT EXISTS `mailer_profiles` (
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `email_templates` (
   `id`       BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  `code`     CHAR(15)        NOT NULL,
+  `code`     VARCHAR(15) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `user`     VARCHAR(16)     NOT NULL,
   `title`    VARCHAR(128)    NOT NULL,
   `body`     MEDIUMTEXT      NOT NULL,
   `is_md`    BOOLEAN         NOT NULL DEFAULT FALSE,
-  `replace_keys` JSON                 DEFAULT NULL
+  `replace_keys` JSON                 DEFAULT NULL,
   `_author`  VARCHAR(320)             DEFAULT NULL,
   `_created` DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `_updated` DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_email_templates_code` (`code`),
-  KEY        `idx_email_templates_user` (`user`)
+  KEY        `idx_email_templates_user` (`user`),
+  CONSTRAINT `chk_email_templates_public_code` CHECK (`code` REGEXP '^429[0-9]{8,12}$')
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 
@@ -60,7 +61,7 @@ CREATE TABLE IF NOT EXISTS `email_templates` (
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `mailing_lists` (
   `id`       BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  `code`     CHAR(15)        NOT NULL,
+  `code`     VARCHAR(15) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `user`     VARCHAR(16)     NOT NULL,
   `name`     VARCHAR(128)    NOT NULL,
   `_author`  VARCHAR(320)             DEFAULT NULL,
@@ -69,7 +70,8 @@ CREATE TABLE IF NOT EXISTS `mailing_lists` (
 
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_mailing_lists_code` (`code`),
-  KEY        `idx_mailing_lists_user` (`user`)
+  KEY        `idx_mailing_lists_user` (`user`),
+  CONSTRAINT `chk_mailing_lists_public_code` CHECK (`code` REGEXP '^218[0-9]{8,12}$')
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 
@@ -81,7 +83,7 @@ CREATE TABLE IF NOT EXISTS `mailing_lists` (
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `emails` (
   `id`          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  `code`        CHAR(15)        NOT NULL,
+  `code`        VARCHAR(15) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `user`        VARCHAR(16)     NOT NULL,
   `template_id` BIGINT UNSIGNED          DEFAULT NULL,
   `subject`     VARCHAR(255)    NOT NULL,
@@ -106,7 +108,9 @@ CREATE TABLE IF NOT EXISTS `emails` (
 
   CONSTRAINT `fk_emails_sender_id`
     FOREIGN KEY (`sender_id`) REFERENCES `mailer_profiles` (`id`)
-    ON DELETE SET NULL ON UPDATE CASCADE
+    ON DELETE SET NULL ON UPDATE CASCADE,
+
+  CONSTRAINT `chk_emails_public_code` CHECK (`code` REGEXP '^421[0-9]{8,12}$')
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 
