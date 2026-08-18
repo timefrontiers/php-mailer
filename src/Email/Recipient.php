@@ -9,6 +9,7 @@ use TimeFrontiers\Validation\Validator;
 use TimeFrontiers\Mailer\Config;
 use TimeFrontiers\Mailer\RecipientType;
 use TimeFrontiers\Mailer\Exception\ValidationException;
+use TimeFrontiers\Mailer\Persistence\DatabaseGateway;
 
 /**
  * An email recipient row in `email_recipients`.
@@ -29,6 +30,7 @@ use TimeFrontiers\Mailer\Exception\ValidationException;
  *   // Lightweight value object (not persisted) — e.g. iterating list members
  *   $r = Recipient::make('alice@example.com', 'Alice', 'Smith', RecipientType::CC);
  */
+/** @phpstan-consistent-constructor */
 class Recipient
 {
   use \TimeFrontiers\Helper\DatabaseObject,
@@ -37,6 +39,7 @@ class Recipient
   protected static string $_primary_key = 'id';
   protected static string $_db_name     = '';
   protected static string $_table_name  = 'email_recipients';
+  /** @var list<string> */
   protected static array  $_db_fields   = [
     'id', 'email_id', 'mlist_id', 'type', 'address', 'name', 'surname', '_created',
   ];
@@ -83,30 +86,29 @@ class Recipient
     RecipientType $type    = RecipientType::TO,
     ?int          $mlistId = null,
   ): self {
+    if ($emailId < 1) {
+      throw new ValidationException('Recipient::forEmail() requires a persisted email id.');
+    }
     $instance = new self($conn);
     [$address, $name, $surname] = $instance->_normaliseContact($contact);
 
-    $found = self::findBySql(
-      'SELECT * FROM :db:.:tbl: WHERE `email_id` = ? AND `address` = ? AND `type` = ? LIMIT 1',
-      [$emailId, $address, $type->value],
+    $db = Config::get()->dbName;
+    $result = DatabaseGateway::execute($conn,
+      "INSERT INTO `{$db}`.`email_recipients` (`email_id`,`mlist_id`,`type`,`address`,`name`,`surname`) VALUES (?,?,?,?,?,?) "
+      . 'ON DUPLICATE KEY UPDATE `id`=LAST_INSERT_ID(`id`),`name`=VALUES(`name`),`surname`=VALUES(`surname`),`mlist_id`=VALUES(`mlist_id`)',
+      [$emailId, $mlistId, $type->value, $address, $name, $surname],
     );
-    if ($found) {
-      return $found[0];
-    }
-
-    $instance->email_id = $emailId;
-    $instance->address  = $address;
-    $instance->name     = $name;
-    $instance->surname  = $surname;
-    $instance->type     = $type->value;
-    $instance->mlist_id = $mlistId;
-
-    if (!$instance->save()) {
+    if ($result === false) {
       throw new \RuntimeException("Recipient::forEmail() — failed to persist recipient {$address}.");
     }
-
-    $instance->id = (int) $instance->conn()->insertId();
-    return $instance;
+    $row = DatabaseGateway::fetchOne($conn,
+      "SELECT `id`,`email_id`,`mlist_id`,`type`,`address`,`name`,`surname`,`_created` FROM `{$db}`.`email_recipients` WHERE `email_id`=? AND `address`=? AND `type`=? LIMIT 1",
+      [$emailId, $address, $type->value],
+    );
+    if (!is_array($row)) {
+      throw new \RuntimeException('Recipient::forEmail() — persisted recipient could not be reloaded.');
+    }
+    return self::_instantiateFromRow($row, $conn);
   }
 
   /**
@@ -133,6 +135,14 @@ class Recipient
     $instance->mlist_id = $mlistId;
 
     return $instance;
+  }
+
+  /** @param string|array{email?:string,name?:string,surname?:string} $contact */
+  public static function fromContact(string|array $contact, RecipientType $type = RecipientType::TO): self
+  {
+    $normaliser = new self();
+    [$address, $name, $surname] = $normaliser->_normaliseContact($contact);
+    return self::make($address, $name ?? '', $surname ?? '', $type);
   }
 
   // -------------------------------------------------------------------------
@@ -162,7 +172,10 @@ class Recipient
   // Internal helpers
   // -------------------------------------------------------------------------
 
-  /** @return array{string, string|null, string|null} */
+  /**
+   * @param string|array{email?:string,name?:string,surname?:string} $contact
+   * @return array{string, string|null, string|null}
+   */
   private function _normaliseContact(string|array $contact): array
   {
     if (is_array($contact)) {
@@ -172,13 +185,13 @@ class Recipient
       }
       $name    = Validator::field('name',    $contact['name']    ?? '')->name()->value() ?: null;
       $surname = Validator::field('surname', $contact['surname'] ?? '')->name()->value() ?: null;
-    } else if ($contact = Str::parseEmailName($contact)) {
-      $address = Validator::field('email', $contact['email'] ?? '')->email()->value();
+    } else if ($parsed = Str::parseEmailName($contact)) {
+      $address = Validator::field('email', $parsed['email'] ?? '')->email()->value();
       if ($address === false) {
         throw new ValidationException("Contact array missing valid [email] key.");
       }
-      $name    = Validator::field('name',    $contact['name']    ?? '')->name()->value() ?: null;
-      $surname = Validator::field('surname', $contact['surname'] ?? '')->name()->value() ?: null;
+      $name    = Validator::field('name',    $parsed['name']    ?? '')->name()->value() ?: null;
+      $surname = Validator::field('surname', $parsed['surname'] ?? '')->name()->value() ?: null;
     } else {
       $address = Validator::field('email', $contact)->email()->value();
       if ($address === false) {
@@ -194,11 +207,13 @@ class Recipient
   // DatabaseObject override
   // -------------------------------------------------------------------------
 
-  public static function _instantiateFromRow(array $row): static
+  /** @param array<string,mixed> $row */
+  public static function _instantiateFromRow(array $row, ?SQLDatabase $conn = null): static
   {
-    $instance = new static();
-    foreach ($row as $key => $value) {
-      if (!is_int($key) && property_exists($instance, $key)) {
+    $instance = $conn === null ? new static() : new static($conn);
+    foreach (static::$_db_fields as $key) {
+      if (array_key_exists($key, $row) && property_exists($instance, $key)) {
+        $value = $row[$key];
         $instance->$key = $value;
       }
     }

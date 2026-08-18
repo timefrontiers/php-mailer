@@ -7,6 +7,7 @@ namespace TimeFrontiers\Mailer;
 use TimeFrontiers\SQLDatabase;
 use TimeFrontiers\Validation\Validator;
 use TimeFrontiers\Mailer\Exception\ValidationException;
+use TimeFrontiers\Mailer\Persistence\DatabaseGateway;
 
 /**
  * Sender profile — a verified email address + display name stored in
@@ -17,6 +18,7 @@ use TimeFrontiers\Mailer\Exception\ValidationException;
  * PK:     id (BIGINT UNSIGNED AUTO_INCREMENT)
  * Unique: address
  */
+/** @phpstan-consistent-constructor */
 class Profile
 {
   use \TimeFrontiers\Helper\DatabaseObject,
@@ -25,6 +27,7 @@ class Profile
   protected static string $_primary_key = 'id';
   protected static string $_db_name     = '';
   protected static string $_table_name  = 'mailer_profiles';
+  /** @var list<string> */
   protected static array  $_db_fields   = [
     'id', 'address', 'name', 'surname', '_author', '_created',
   ];
@@ -74,29 +77,29 @@ class Profile
       throw new ValidationException("Profile::resolve() — invalid email address.");
     }
 
-    $found = self::findBySql(
-      'SELECT * FROM :db:.:tbl: WHERE `address` = ? LIMIT 1',
-      [$address],
-    );
-    if ($found) {
-      return $found[0];
-    }
-
     $validName = Validator::field('name', $name)->name()->value();
     if ($validName === false) {
       throw new ValidationException("Profile::resolve() — invalid name.");
     }
 
-    $instance->address = $address;
-    $instance->name    = $validName;
-    $instance->surname = Validator::field('surname', $surname)->name()->value() ?: '';
-
-    if (!$instance->save()) {
+    $validSurname = Validator::field('surname', $surname)->name()->value() ?: '';
+    $db = Config::get()->dbName;
+    $result = DatabaseGateway::execute($conn,
+      "INSERT INTO `{$db}`.`mailer_profiles` (`address`,`name`,`surname`) VALUES (?,?,?) "
+      . 'ON DUPLICATE KEY UPDATE `id`=LAST_INSERT_ID(`id`)',
+      [$address, $validName, $validSurname],
+    );
+    if ($result === false) {
       throw new \RuntimeException("Profile::resolve() — failed to persist profile for {$address}.");
     }
-
-    $instance->id = (int) $instance->conn()->insertId();
-    return $instance;
+    $row = DatabaseGateway::fetchOne($conn,
+      "SELECT `id`,`address`,`name`,`surname`,`_author`,`_created` FROM `{$db}`.`mailer_profiles` WHERE `address`=? LIMIT 1",
+      [$address],
+    );
+    if (!is_array($row)) {
+      throw new \RuntimeException('Profile::resolve() — persisted profile could not be reloaded.');
+    }
+    return self::_instantiateFromRow($row, $conn);
   }
 
   // -------------------------------------------------------------------------
@@ -128,12 +131,13 @@ class Profile
   // DatabaseObject override
   // -------------------------------------------------------------------------
 
-  public static function _instantiateFromRow(array $row): static
+  /** @param array<string,mixed> $row */
+  public static function _instantiateFromRow(array $row, ?SQLDatabase $conn = null): static
   {
-    $instance = new static();
-    foreach ($row as $key => $value) {
-      if (!is_int($key) && property_exists($instance, $key)) {
-        $instance->$key = $value;
+    $instance = $conn === null ? new static() : new static($conn);
+    foreach (static::$_db_fields as $key) {
+      if (array_key_exists($key, $row) && property_exists($instance, $key)) {
+        $instance->$key = $row[$key];
       }
     }
     return $instance;

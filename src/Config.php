@@ -56,7 +56,46 @@ final class Config
      * @var array<string, array{templateCode: string|null, replaceVars: string[]}>
      */
     public readonly array $templates = [],
-  ) {}
+    /** reject | preserve | empty */
+    public readonly string $unresolvedTokenPolicy = 'reject',
+    /** Trusted templates may contain raw HTML; user-authored untrusted HTML is unsupported. */
+    public readonly bool $trustedTemplateHtml = true,
+    public readonly int $maxTemplateBytes = 1_048_576,
+    public readonly int $maxRenderedBytes = 2_097_152,
+    public readonly int $maxAttachments = 20,
+    public readonly int $maxAttachmentBytes = 25_165_824,
+    public readonly int $maxTotalAttachmentBytes = 31_457_280,
+    /** @var list<string> Empty means every non-executable MIME accepted by php-file is allowed. */
+    public readonly array $allowedAttachmentMimeTypes = [],
+    public readonly int $queueLeaseSeconds = 300,
+    public readonly int $queueMaxAttempts = 5,
+    public readonly int $queueBaseBackoffSeconds = 60,
+    /** @var (\Closure(DriverConfigInterface):\TimeFrontiers\Mailer\Driver\MailDriverInterface)|null */
+    public readonly ?\Closure $driverFactory = null,
+    /** @var (\Closure():\DateTimeImmutable)|null Deterministic queue clock for tests and controlled workers. */
+    public readonly ?\Closure $clock = null,
+    /** @var (\Closure(\TimeFrontiers\SQLDatabase,int):\TimeFrontiers\File\File)|null */
+    public readonly ?\Closure $fileResolver = null,
+  ) {
+    if (preg_match('/^[A-Za-z0-9_]+$/D', $this->dbName) !== 1) {
+      throw new ConfigException('Mailer database name contains unsupported characters.');
+    }
+    $url = parse_url($this->mailServer);
+    if ($url === false || !isset($url['scheme'], $url['host']) || !in_array(strtolower((string) $url['scheme']), ['https', 'http'], true)) {
+      throw new ConfigException('Mailer server must be an absolute HTTP or HTTPS URL.');
+    }
+    if (!in_array($this->unresolvedTokenPolicy, ['reject', 'preserve', 'empty'], true)) {
+      throw new ConfigException('Unresolved token policy must be reject, preserve, or empty.');
+    }
+    foreach ([$this->maxTemplateBytes, $this->maxRenderedBytes, $this->maxAttachments, $this->maxAttachmentBytes, $this->maxTotalAttachmentBytes, $this->queueLeaseSeconds, $this->queueMaxAttempts, $this->queueBaseBackoffSeconds] as $limit) {
+      if ($limit < 1) {
+        throw new ConfigException('Mailer size, retry, and lease limits must be positive integers.');
+      }
+    }
+    if ($this->maxAttachmentBytes > $this->maxTotalAttachmentBytes) {
+      throw new ConfigException('Individual attachment limit may not exceed the total attachment limit.');
+    }
+  }
 
   // -------------------------------------------------------------------------
   // Static registry
@@ -64,6 +103,9 @@ final class Config
 
   public static function set(self $config): void
   {
+    if (self::$_instance !== null) {
+      throw new ConfigException('TimeFrontiers\\Mailer: Config is already initialised and cannot be replaced at runtime.');
+    }
     self::$_instance = $config;
   }
 
@@ -93,6 +135,15 @@ final class Config
   public function getTemplate(string $type): ?array
   {
     return $this->templates[$type] ?? null;
+  }
+
+  public function now(): \DateTimeImmutable
+  {
+    $now = $this->clock === null ? new \DateTimeImmutable('now', new \DateTimeZone('UTC')) : ($this->clock)();
+    if (!$now instanceof \DateTimeImmutable) {
+      throw new ConfigException('Mailer clock must return DateTimeImmutable.');
+    }
+    return $now->setTimezone(new \DateTimeZone('UTC'));
   }
 
   /** Reset — intended for tests only. */

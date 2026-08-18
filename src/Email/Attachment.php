@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace TimeFrontiers\Mailer\Email;
 
 use TimeFrontiers\File\File;
+use TimeFrontiers\Mailer\Config;
+use TimeFrontiers\Mailer\Exception\DriverException;
+use TimeFrontiers\SQLDatabase;
 
 /**
  * Immutable attachment value object passed to the mail driver at send time.
@@ -33,7 +36,18 @@ final class Attachment
      * Null = transient (fromPath) — not stored in email_attachments.
      */
     public readonly ?int $fileId = null,
-  ) {}
+    public readonly int $size = 0,
+  ) {
+    if ($this->name === '' || preg_match('/[\r\n\0]/', $this->name) === 1) {
+      throw new \InvalidArgumentException('Attachment name is invalid.');
+    }
+    if (preg_match('/^[A-Za-z0-9][A-Za-z0-9!#$&^_.+\/-]*$/D', $this->mimeType) !== 1) {
+      throw new \InvalidArgumentException('Attachment MIME type is invalid.');
+    }
+    if ($this->size < 0) {
+      throw new \InvalidArgumentException('Attachment size cannot be negative.');
+    }
+  }
 
   // -------------------------------------------------------------------------
   // Factory methods
@@ -44,12 +58,26 @@ final class Attachment
    */
   public static function fromFile(File $file): self
   {
+    if ($file->id === null) {
+      throw new \InvalidArgumentException('Queued attachments must reference a persisted php-file object.');
+    }
     return new self(
       name:     $file->nice_name !== '' ? $file->nice_name : $file->name(),
       mimeType: $file->type(),
-      loader:   static fn(): string => (string) file_get_contents($file->fullPath()),
+      loader:   static fn(): mixed => $file->openReadStream(),
       fileId:   $file->id,
+      size:     $file->size(),
     );
+  }
+
+  public static function fromFileId(SQLDatabase $conn, int $fileId): self
+  {
+    $resolver = Config::get()->fileResolver;
+    $file = $resolver === null ? File::findById($fileId, $conn) : $resolver($conn, $fileId);
+    if (!$file instanceof File) {
+      throw new DriverException('Persisted attachment could not be loaded.');
+    }
+    return self::fromFile($file);
   }
 
   /**
@@ -62,10 +90,15 @@ final class Attachment
     if (!is_readable($path)) {
       throw new \InvalidArgumentException("Cannot read attachment at path: {$path}");
     }
+    $size = filesize($path);
+    if ($size === false) {
+      throw new \InvalidArgumentException("Cannot determine attachment size at path: {$path}");
+    }
     return new self(
       name:     $name,
       mimeType: $mimeType,
-      loader:   static fn(): string => (string) file_get_contents($path),
+      loader:   static fn(): mixed => fopen($path, 'rb'),
+      size:     $size,
     );
   }
 
@@ -76,7 +109,29 @@ final class Attachment
   /** Load and return attachment bytes. Called once by the driver. */
   public function getContent(): string
   {
-    return ($this->loader)();
+    $limit = Config::get()->maxAttachmentBytes;
+    if ($this->size > $limit) {
+      throw new DriverException('Attachment exceeds the configured individual size limit.');
+    }
+    $stream = ($this->loader)();
+    if (!is_resource($stream)) {
+      throw new DriverException('Attachment stream could not be opened.');
+    }
+    try {
+      $content = stream_get_contents($stream, $limit + 1);
+    } finally {
+      fclose($stream);
+    }
+    if ($content === false) {
+      throw new DriverException('Attachment stream could not be read.');
+    }
+    if (strlen($content) > $limit) {
+      throw new DriverException('Attachment exceeds the configured individual size limit.');
+    }
+    if (strlen($content) !== $this->size) {
+      throw new DriverException('Attachment stream length does not match persisted metadata.');
+    }
+    return $content;
   }
 
   /** True when backed by a php-file record (email_attachments row will exist). */

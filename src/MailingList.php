@@ -11,23 +11,24 @@ use TimeFrontiers\Mailer\Config;
 use TimeFrontiers\Mailer\RecipientType;
 use TimeFrontiers\Mailer\Email\Recipient;
 use TimeFrontiers\Mailer\Exception\ValidationException;
+use TimeFrontiers\Mailer\Persistence\DatabaseGateway;
 
 /**
  * Mailing list stored in `mailing_lists`.
  *
- * A mailing list is a named group of recipients. Each member is a row in
- * `email_recipients` with a non-null `mlist_id` and a null `email_id`.
+ * A mailing list is a named group of recipients. Each standing member is a row
+ * in `mailing_list_members` with a non-null `mailing_list_id`.
  * At send time the caller iterates `recipients()` and sends to each member.
  *
  * Table:   mailing_lists
  * PK:      id (BIGINT UNSIGNED AUTO_INCREMENT)
  * Unique:  code CHAR(15) — prefix 218, 12 random digits
  */
+/** @phpstan-consistent-constructor */
 class MailingList
 {
   use \TimeFrontiers\Helper\DatabaseObject,
-      \TimeFrontiers\Helper\Pagination,
-      \TimeFrontiers\Helper\HasErrors;
+      \TimeFrontiers\Helper\Pagination;
 
   public const CODE_PREFIX  = '218';
   public const CODE_LENGTH  = 15;
@@ -36,6 +37,7 @@ class MailingList
   protected static string $_primary_key = 'id';
   protected static string $_db_name     = '';
   protected static string $_table_name  = 'mailing_lists';
+  /** @var list<string> */
   protected static array  $_db_fields   = [
     'id', 'code', 'user', 'name', '_author', '_created', '_updated',
   ];
@@ -92,7 +94,7 @@ class MailingList
       throw new \RuntimeException("MailingList::make() — failed to persist mailing list.");
     }
 
-    $instance->id = (int) $instance->conn()->insertId();
+    $instance->id = (int) DatabaseGateway::insertId($instance->conn());
     return $instance;
   }
 
@@ -106,10 +108,13 @@ class MailingList
       return null;
     }
     $found = self::findBySql(
-      'SELECT * FROM :db:.:tbl: WHERE `code` = ? LIMIT 1',
+      'SELECT `id`,`code`,`user`,`name`,`_author`,`_created`,`_updated` FROM :db:.:tbl: WHERE `code` = ? LIMIT 1',
       [$code],
     );
-    return $found ? $found[0] : null;
+    if ($found === false) {
+      throw new \RuntimeException('Mailing-list lookup failed.');
+    }
+    return $found === [] ? null : $found[0];
   }
 
   // -------------------------------------------------------------------------
@@ -130,7 +135,8 @@ class MailingList
       return [];
     }
 
-    $sql    = 'SELECT * FROM :db:.:tbl: WHERE `mlist_id` = ?';
+    $db = Config::get()->dbName;
+    $sql = "SELECT `id`,NULL AS `email_id`,`mailing_list_id` AS `mlist_id`,`type`,`address`,`name`,`surname`,`_created` FROM `{$db}`.`mailing_list_members` WHERE `mailing_list_id`=?";
     $params = [$this->id];
 
     if ($type !== null) {
@@ -140,17 +146,17 @@ class MailingList
 
     $sql .= ' ORDER BY `id` ASC';
 
-    // Temporarily use the Recipient table by swapping the Recipient static scope.
-    // DatabaseObject::findBySql resolves :db: and :tbl: from the calling class,
-    // so we delegate directly to Recipient::findBySql.
-    return Recipient::findBySql($sql, $params) ?: [];
+    $rows = DatabaseGateway::fetchAll($this->conn(), $sql, $params);
+    if ($rows === false) {
+      throw new \RuntimeException('Mailing-list members could not be loaded.');
+    }
+    return array_values(array_map(fn(array $row): Recipient => Recipient::_instantiateFromRow($row, $this->conn()), $rows));
   }
 
   /**
    * Add a new member to this list.
    *
-   * Uses Recipient::forEmail() semantics but with email_id = null so the row
-   * is a list-member rather than a per-email recipient.
+   * Returns a Recipient-compatible hydrated view of the standing member row.
    *
    * @param string|array{email?: string, name?: string, surname?: string} $contact
    * @throws ValidationException|\RuntimeException
@@ -160,40 +166,30 @@ class MailingList
     string|array  $contact,
     RecipientType $type = RecipientType::TO,
   ): Recipient {
-    // Reuse the Recipient make() factory for validation; then persist manually
-    // with the mlist_id set and email_id left null.
-    $address = is_array($contact) ? ($contact['email'] ?? '') : $contact;
-    $name    = is_array($contact) ? ($contact['name']    ?? '') : '';
-    $surname = is_array($contact) ? ($contact['surname'] ?? '') : '';
-
-    $transient = Recipient::make($address, $name, $surname, $type, $this->id);
-
-    // Check for duplicate before persisting
-    $existing = Recipient::findBySql(
-      'SELECT * FROM :db:.:tbl: WHERE `mlist_id` = ? AND `address` = ? AND `type` = ? LIMIT 1',
+    if ($this->id === null) {
+      throw new \LogicException('Mailing list must be persisted before adding members.');
+    }
+    if ($conn->getInstance() !== $this->conn()->getInstance()) {
+      throw new \LogicException('Cross-database mailing-list membership is not supported.');
+    }
+    $transient = Recipient::fromContact($contact, $type);
+    $db = Config::get()->dbName;
+    $result = DatabaseGateway::execute($conn,
+      "INSERT INTO `{$db}`.`mailing_list_members` (`mailing_list_id`,`type`,`address`,`name`,`surname`) VALUES (?,?,?,?,?) "
+      . 'ON DUPLICATE KEY UPDATE `id`=LAST_INSERT_ID(`id`),`name`=VALUES(`name`),`surname`=VALUES(`surname`)',
+      [$this->id, $type->value, $transient->address, $transient->name, $transient->surname],
+    );
+    if ($result === false) {
+      throw new \RuntimeException("Mailing-list member {$transient->address} could not be persisted.");
+    }
+    $persisted = DatabaseGateway::fetchOne($conn,
+      "SELECT `id`,NULL AS `email_id`,`mailing_list_id` AS `mlist_id`,`type`,`address`,`name`,`surname`,`_created` FROM `{$db}`.`mailing_list_members` WHERE `mailing_list_id`=? AND `address`=? AND `type`=? LIMIT 1",
       [$this->id, $transient->address, $type->value],
     );
-    if ($existing) {
-      return $existing[0];
+    if (!is_array($persisted)) {
+      throw new \RuntimeException('Persisted mailing-list member could not be reloaded.');
     }
-
-    // Build a persisted recipient tied to this list (email_id stays null)
-    $row             = new Recipient($conn);
-    $row->email_id   = null;
-    $row->mlist_id   = $this->id;
-    $row->address    = $transient->address;
-    $row->name       = $transient->name;
-    $row->surname    = $transient->surname;
-    $row->type       = $type->value;
-
-    if (!$row->save()) {
-      throw new \RuntimeException(
-        "MailingList::addMember() — failed to persist member {$transient->address}."
-      );
-    }
-
-    $row->id = (int) $row->conn()->insertId();
-    return $row;
+    return Recipient::_instantiateFromRow($persisted, $conn);
   }
 
   // -------------------------------------------------------------------------
@@ -212,12 +208,13 @@ class MailingList
   // DatabaseObject override
   // -------------------------------------------------------------------------
 
-  public static function _instantiateFromRow(array $row): static
+  /** @param array<string,mixed> $row */
+  public static function _instantiateFromRow(array $row, ?SQLDatabase $conn = null): static
   {
-    $instance = new static();
-    foreach ($row as $key => $value) {
-      if (!is_int($key) && property_exists($instance, $key)) {
-        $instance->$key = $value;
+    $instance = $conn === null ? new static() : new static($conn);
+    foreach (static::$_db_fields as $key) {
+      if (array_key_exists($key, $row) && property_exists($instance, $key)) {
+        $instance->$key = $key === 'id' && $row[$key] !== null ? (int) $row[$key] : $row[$key];
       }
     }
     return $instance;

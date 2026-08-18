@@ -26,7 +26,8 @@ interface MailDriverInterface
   /**
    * Dispatch a single message.
    *
-   * @param  Attachment[] $attachments  Zero or more attachments.
+   * @param array<string,string|list<string>> $headers
+   * @param list<Attachment> $attachments Zero or more attachments.
    * @return string  Provider message ID (e.g. Mailgun's `<id@mg.domain>`).
    * @throws DriverException on any delivery failure.
    */

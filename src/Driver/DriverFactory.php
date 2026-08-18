@@ -16,8 +16,16 @@ use TimeFrontiers\Mailer\Exception\MailerException;
  */
 final class DriverFactory
 {
-  public static function fromConfig(DriverConfigInterface $config): MailDriverInterface
+  /** @param (callable(DriverConfigInterface):MailDriverInterface)|null $resolver */
+  public static function fromConfig(DriverConfigInterface $config, ?callable $resolver = null): MailDriverInterface
   {
+    if ($resolver !== null) {
+      $driver = $resolver($config);
+      if (!$driver instanceof MailDriverInterface) {
+        throw new MailerException('Injected driver factory must return MailDriverInterface.');
+      }
+      return $driver;
+    }
     return match(true) {
       $config instanceof MailgunConfig => new MailgunDriver($config),
       $config instanceof SmtpConfig    => new SmtpDriver($config),

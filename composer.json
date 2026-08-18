@@ -20,25 +20,27 @@
     }
   ],
   "require": {
-    "php": ">=8.4",
+    "php": ">=8.5",
     "timefrontiers/php-data": "^1.0",
     "timefrontiers/php-core": "^1.0",
     "timefrontiers/php-sql-database": "^1.1",
-    "timefrontiers/php-database-object": "^1.0",
-    "timefrontiers/php-multiform": "^1.0",
+    "timefrontiers/php-database-object": "^1.1.1",
     "timefrontiers/php-pagination": "^1.0",
-    "timefrontiers/php-instance-error": "^1.0",
     "timefrontiers/php-has-errors": "^1.0",
-    "timefrontiers/php-validator": "^1.0",
-    "timefrontiers/php-file": "^1.0",
+    "timefrontiers/php-validator": "^1.1",
+    "timefrontiers/php-file": "^1.1",
     "symfony/mailer": "^7.0",
     "symfony/mailgun-mailer": "^7.0",
     "symfony/http-client": "^7.0",
     "league/commonmark": "^2.5"
   },
   "require-dev": {
-    "phpunit/phpunit": "^10.0",
-    "phpstan/phpstan": "^1.10"
+    "php-parallel-lint/php-parallel-lint": "^1.4",
+    "phpstan/phpstan": "^2.2",
+    "phpunit/phpunit": "^10.5"
+  },
+  "suggest": {
+    "timefrontiers/php-instance-error": "Optional consumer-side rank-aware extraction of canonical HasErrors data"
   },
   "autoload": {
     "psr-4": {
@@ -51,10 +53,20 @@
     }
   },
   "scripts": {
-    "test": "phpunit",
-    "analyse": "phpstan analyse src --level=8"
+    "analyse": "@php vendor/bin/phpstan analyse --configuration=phpstan.neon.dist --memory-limit=1G",
+    "check": [
+      "@lint",
+      "@test",
+      "@analyse"
+    ],
+    "lint": "@php vendor/bin/parallel-lint src tests",
+    "test": "@php vendor/bin/phpunit --configuration=phpunit.xml.dist",
+    "test-integration": "@php vendor/bin/phpunit --configuration=phpunit.xml.dist --testsuite Integration",
+    "test-unit": "@php vendor/bin/phpunit --configuration=phpunit.xml.dist --testsuite Unit"
   },
   "config": {
     "sort-packages": true
-  }
+  },
+  "minimum-stability": "stable",
+  "prefer-stable": true
 }

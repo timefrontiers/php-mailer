@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace TimeFrontiers\Mailer\Log;
 
 use TimeFrontiers\SQLDatabase;
-use TimeFrontiers\Data\Random;
 use TimeFrontiers\Mailer\Config;
+use TimeFrontiers\Mailer\Persistence\DatabaseGateway;
 
 /**
  * Delivery log row in `email_log`.
@@ -19,6 +19,7 @@ use TimeFrontiers\Mailer\Config;
  * Table:  email_log
  * PK:     id (BIGINT UNSIGNED AUTO_INCREMENT)
  */
+/** @phpstan-consistent-constructor */
 class EmailLog
 {
   use \TimeFrontiers\Helper\DatabaseObject,
@@ -27,6 +28,7 @@ class EmailLog
   protected static string $_primary_key = 'id';
   protected static string $_db_name     = '';
   protected static string $_table_name  = 'email_log';
+  /** @var list<string> */
   protected static array  $_db_fields   = [
     'id', 'priority', 'qref', 'sent', 'unread',
     'email_id', 'sender_id', 'recipient_id',
@@ -81,22 +83,25 @@ class EmailLog
     int         $recipientId,
     int         $priority = 5,
   ): self {
-    $instance              = new self($conn);
-    $instance->email_id    = $emailId;
-    $instance->sender_id   = $senderId;
-    $instance->recipient_id = $recipientId;
-    $instance->priority    = max(1, min(10, $priority));
-    $instance->sent        = false;
-    $instance->unread      = true;
-
-    if (!$instance->save()) {
-      throw new \RuntimeException(
-        "EmailLog::queue() — failed to persist log entry for email {$emailId}."
-      );
+    $instance = new self($conn);
+    $priority = max(1, min(10, $priority));
+    $db = Config::get()->dbName;
+    $result = DatabaseGateway::execute($conn,
+      "INSERT INTO `{$db}`.`email_log` (`priority`,`sent`,`unread`,`email_id`,`sender_id`,`recipient_id`) VALUES (?,0,1,?,?,?) "
+      . 'ON DUPLICATE KEY UPDATE `id`=LAST_INSERT_ID(`id`),`priority`=VALUES(`priority`),`sender_id`=VALUES(`sender_id`)',
+      [$priority, $emailId, $senderId, $recipientId],
+    );
+    if ($result === false) {
+      throw new \RuntimeException("Email log entry for email {$emailId} could not be persisted.");
     }
-
-    $instance->id = (int) $instance->conn()->insertId();
-    return $instance;
+    $row = DatabaseGateway::fetchOne($conn,
+      "SELECT `id`,`priority`,`qref`,`sent`,`unread`,`email_id`,`sender_id`,`recipient_id`,`_author`,`_created`,`_updated` FROM `{$db}`.`email_log` WHERE `email_id`=? AND `recipient_id`=? LIMIT 1",
+      [$emailId, $recipientId],
+    );
+    if (!is_array($row)) {
+      throw new \RuntimeException('Persisted email log could not be reloaded.');
+    }
+    return self::_instantiateFromRow($row, $conn);
   }
 
   /**
@@ -106,10 +111,13 @@ class EmailLog
   {
     $instance = new self($conn);
     $found    = self::findBySql(
-      'SELECT * FROM :db:.:tbl: WHERE `id` = ? LIMIT 1',
+      'SELECT `id`,`priority`,`qref`,`sent`,`unread`,`email_id`,`sender_id`,`recipient_id`,`_author`,`_created`,`_updated` FROM :db:.:tbl: WHERE `id` = ? LIMIT 1',
       [$id],
     );
-    return $found ? $found[0] : null;
+    if ($found === false) {
+      throw new \RuntimeException('Email log lookup failed.');
+    }
+    return $found === [] ? null : $found[0];
   }
 
   // -------------------------------------------------------------------------
@@ -125,9 +133,23 @@ class EmailLog
    */
   public function markSent(string $qref): bool
   {
+    if ($this->id === null || $qref === '') {
+      return false;
+    }
+    if ($this->sent && $this->qref === $qref) {
+      return true;
+    }
+    $db = Config::get()->dbName;
+    $result = DatabaseGateway::execute($this->conn(),
+      "UPDATE `{$db}`.`email_log` SET `qref`=?,`sent`=1 WHERE `id`=? AND `sent`=0",
+      [$qref, $this->id],
+    );
+    if ($result === false || $this->conn()->affectedRows() !== 1) {
+      return false;
+    }
     $this->qref = $qref;
     $this->sent = true;
-    return $this->save();
+    return true;
   }
 
   /**
@@ -137,19 +159,37 @@ class EmailLog
    */
   public function markRead(): bool
   {
+    if ($this->id === null || !$this->unread) {
+      return $this->id !== null;
+    }
+    $db = Config::get()->dbName;
+    $result = DatabaseGateway::execute($this->conn(),
+      "UPDATE `{$db}`.`email_log` SET `unread`=0 WHERE `id`=? AND `unread`=1",
+      [$this->id],
+    );
+    if ($result === false || $this->conn()->affectedRows() !== 1) {
+      return false;
+    }
     $this->unread = false;
-    return $this->save();
+    return true;
   }
 
   // -------------------------------------------------------------------------
   // DatabaseObject override
   // -------------------------------------------------------------------------
 
-  public static function _instantiateFromRow(array $row): static
+  /** @param array<string,mixed> $row */
+  public static function _instantiateFromRow(array $row, ?SQLDatabase $conn = null): static
   {
-    $instance = new static();
-    foreach ($row as $key => $value) {
-      if (!is_int($key) && property_exists($instance, $key)) {
+    $instance = $conn === null ? new static() : new static($conn);
+    foreach (static::$_db_fields as $key) {
+      if (array_key_exists($key, $row) && property_exists($instance, $key)) {
+        $value = $row[$key];
+        if (in_array($key, ['id', 'priority', 'email_id', 'sender_id', 'recipient_id'], true)) {
+          $value = $value === null ? null : (int) $value;
+        } elseif (in_array($key, ['sent', 'unread'], true)) {
+          $value = (bool) $value;
+        }
         $instance->$key = $value;
       }
     }

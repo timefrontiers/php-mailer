@@ -6,6 +6,8 @@ namespace TimeFrontiers\Mailer\Driver;
 
 use Symfony\Component\Mailer\Transport;
 use Symfony\Component\Mailer\Transport\TransportInterface;
+use Symfony\Component\Mailer\Transport\Smtp\SmtpTransport;
+use Symfony\Component\Mailer\Transport\Smtp\Stream\SocketStream;
 use Symfony\Component\Mime\Email as MimeEmail;
 use Symfony\Component\Mime\Address;
 use Symfony\Component\Mime\Part\DataPart;
@@ -13,6 +15,8 @@ use TimeFrontiers\Mailer\Profile;
 use TimeFrontiers\Mailer\Email\Recipient;
 use TimeFrontiers\Mailer\Email\Attachment;
 use TimeFrontiers\Mailer\Exception\DriverException;
+use TimeFrontiers\Mailer\Exception\UnknownDeliveryException;
+use TimeFrontiers\Mailer\RecipientType;
 
 /**
  * Native SMTP driver — dispatches via Symfony Mailer's SMTP transport.
@@ -26,18 +30,27 @@ final class SmtpDriver implements MailDriverInterface
 {
   private readonly TransportInterface $transport;
 
-  public function __construct(SmtpConfig $config)
+  public function __construct(SmtpConfig $config, ?TransportInterface $transport = null)
   {
+    if ($transport !== null) {
+      $this->transport = $transport;
+      return;
+    }
     try {
-      $this->transport = Transport::fromDsn($config->toDsn());
+      $resolved = Transport::fromDsn($config->toDsn());
+      if ($resolved instanceof SmtpTransport && $resolved->getStream() instanceof SocketStream) {
+        $resolved->getStream()->setTimeout($config->timeout);
+      }
+      $this->transport = $resolved;
     } catch (\Throwable $e) {
-      throw new DriverException(
-        "[SMTP] Failed to initialise transport: {$e->getMessage()}",
-        previous: $e,
-      );
+      throw new DriverException('SMTP transport configuration is invalid.', previous: $e);
     }
   }
 
+  /**
+   * @param array<string,string|list<string>> $headers
+   * @param list<Attachment> $attachments
+   */
   public function send(
     Profile   $sender,
     Recipient $recipient,
@@ -54,19 +67,24 @@ final class SmtpDriver implements MailDriverInterface
     try {
       $sent = $this->transport->send($email);
     } catch (\Throwable $e) {
-      throw new DriverException(
-        "[SMTP] Dispatch failed: {$e->getMessage()}",
-        previous: $e,
-      );
+      throw new UnknownDeliveryException('SMTP delivery outcome is unknown; reconcile before retrying.', previous: $e);
     }
 
-    return $sent?->getMessageId() ?? '';
+    $messageId = $sent?->getMessageId() ?? '';
+    if ($messageId === '') {
+      throw new UnknownDeliveryException('SMTP accepted a message without a usable message identifier; reconciliation is required.');
+    }
+    return $messageId;
   }
 
   // -------------------------------------------------------------------------
   // Internal helpers
   // -------------------------------------------------------------------------
 
+  /**
+   * @param array<string,string|list<string>> $headers
+   * @param list<Attachment> $attachments
+   */
   private function _buildMessage(
     Profile   $sender,
     Recipient $recipient,
@@ -78,10 +96,17 @@ final class SmtpDriver implements MailDriverInterface
   ): MimeEmail {
     $email = (new MimeEmail())
       ->from(new Address($sender->address ?? '', $sender->displayName()))
-      ->to(new Address($recipient->address ?? '', $recipient->displayName()))
       ->subject($subject)
       ->html($bodyHtml)
       ->text($bodyText);
+
+    $address = new Address($recipient->address ?? '', $recipient->displayName());
+    match ($recipient->recipientType()) {
+      RecipientType::TO => $email->to($address),
+      RecipientType::CC => $email->cc($address),
+      RecipientType::BCC => $email->bcc($address),
+      RecipientType::REPLY_TO => throw new DriverException('Reply-To entries are not delivery recipients.'),
+    };
 
     foreach ($headers as $name => $value) {
       $addresses = is_array($value) ? $value : [$value];

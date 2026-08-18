@@ -1,362 +1,225 @@
-# timefrontiers/php-mailer
+# TimeFrontiers PHP Mailer
 
-Email sending, templating, bulk queuing, and delivery logging for the TimeFrontiers ecosystem.
-
-Supports **Mailgun** and native **SMTP** out of the box. Additional drivers can be added by implementing `MailDriverInterface`. Attachment support is provided via `timefrontiers/php-file` (persisted files) or raw filesystem paths (transient).
-
----
+Email delivery, templating, mailing lists, attachments, and a durable worker queue for the TimeFrontiers ecosystem.
 
 ## Requirements
 
-- PHP 8.2+
-- MySQL 8.0+ / MariaDB 10.6+
-- `timefrontiers/php-file ^1.0`
-- `symfony/mailer ^7.0`
+- PHP 8.5+
+- MySQL 8.0.29+ or MariaDB 10.6+
+- `timefrontiers/php-sql-database ^1.1`
+- `timefrontiers/php-database-object ^1.1.1`
+- `timefrontiers/php-file ^1.1`
+- `timefrontiers/php-validator ^1.1`
+- Symfony Mailer 7.x
 
----
+The package retains `HasErrors` through Database Object. `timefrontiers/php-instance-error` is an optional consumer-side suggestion. `timefrontiers/php-multiform` has no mailer persistence responsibility and is no longer a runtime dependency.
 
-## Installation
+## Installation and database
 
 ```bash
-composer require timefrontiers/php-mailer
+composer require timefrontiers/php-mailer:^1.1.1
 ```
 
----
+The 1.1 line starts at `1.1.1`; `1.1.0` was never tagged.
 
-## Database
+For a fresh installation, apply [`schema/schema.sql`](schema/schema.sql). Existing 1.0 installations must follow [`UPGRADING.md`](UPGRADING.md) and apply [`schema/migrations/1.1.0.sql`](schema/migrations/1.1.0.sql) while old workers are stopped.
 
-Run `schema/schema.sql` against your target database to create all required tables:
+## Boot configuration
 
-```
-mailer_profiles     — verified sender identities
-email_templates     — reusable HTML/Markdown shells
-mailing_lists       — named recipient groups
-emails              — core email records (DRAFT → OUTBOX → SENT)
-email_recipients    — TO / CC / BCC / Reply-To per email or list
-email_attachments   — maps emails to php-file File records
-email_log           — per-recipient delivery tracking
-email_queue         — bulk personalized send queue (see Queue)
-```
-
-> **Note:** `email_queue` references `mailer_profiles` via FK. Run the full schema in order, or use the two-step approach documented in the schema file comments.
-
----
-
-## Bootstrap
-
-Call `Config::set()` **once** at application startup before using any mailer class:
+Configuration is validated and frozen on the first `Config::set()` call. Runtime mutation is rejected so a worker cannot silently change the driver or limits of an existing process.
 
 ```php
 use TimeFrontiers\Mailer\Config;
-use TimeFrontiers\Mailer\Driver\MailgunConfig;
 use TimeFrontiers\Mailer\Driver\SmtpConfig;
 
-// Mailgun
 Config::set(new Config(
-    dbName:     'msgservice',
-    mailServer: 'https://mail.example.com',
-    driver: new MailgunConfig(
-        domain: 'mg.example.com',
-        apiKey: 'key-xxxxxxxxxxxx',
-        region: 'us',   // 'us' or 'eu'
-    ),
-));
-
-// — or — native SMTP
-Config::set(new Config(
-    dbName:     'msgservice',
+    dbName: 'mailer',
     mailServer: 'https://mail.example.com',
     driver: new SmtpConfig(
-        host:       'smtp.example.com',
-        port:       587,
-        username:   'user@example.com',
-        password:   'secret',
-        encryption: 'tls',   // 'tls' | 'ssl' | 'none'
+        host: 'smtp.example.com',
+        port: 587,
+        username: $_ENV['SMTP_USER'],
+        password: $_ENV['SMTP_PASSWORD'],
+        encryption: 'required-tls',
+        timeout: 30.0,
     ),
+    unresolvedTokenPolicy: 'reject',
+    maxRenderedBytes: 2 * 1024 * 1024,
+    maxAttachments: 20,
+    maxAttachmentBytes: 24 * 1024 * 1024,
+    maxTotalAttachmentBytes: 30 * 1024 * 1024,
+    queueLeaseSeconds: 300,
+    queueMaxAttempts: 5,
+    queueBaseBackoffSeconds: 60,
 ));
 ```
 
-### Registering templates in Config
+SMTP modes are explicit:
 
-Associate template codes and token variable lists with named message types. This lets `Email::make()` resolve the correct template automatically.
+- `required-tls`: STARTTLS is mandatory.
+- `opportunistic-tls`: use STARTTLS when advertised.
+- `implicit-tls`: TLS from connection start, normally port 465.
+- `none`: disables Symfony automatic TLS deliberately; use only for a trusted relay.
+- `tls` and `ssl` remain aliases for `required-tls` and `implicit-tls`.
 
-```php
-Config::set(new Config(
-    dbName:     'msgservice',
-    mailServer: 'https://mail.example.com',
-    driver:     new MailgunConfig(...),
-    templates: [
-        'default' => [
-            'templateCode' => '42912345678',          // email_templates.code
-            'replaceVars'  => ['user-name', 'user-surname'],
-        ],
-        'order-confirm' => [
-            'templateCode' => '42999999999',
-            'replaceVars'  => ['order-id', 'total', 'user-name'],
-        ],
-    ],
-));
-```
-
----
+Credentials are percent-encoded in the internal DSN. Do not log `toDsn()`. Mailgun accepts only the `us` and `eu` regions and passes the region through Symfony's documented `region` option.
 
 ## Sending an email
 
-### `Email::make()` signature
-
-```php
-Email::make(
-    SQLDatabase              $conn,
-    Profile                  $sender,
-    string                   $subject,
-    string                   $body,
-    string                   $user         = 'SYSTEM',
-    ?string                  $message_type = 'default',
-    int|string|Template|null $template     = null,
-    ?DriverConfigInterface   $driver       = null,
-    bool                     $log_body     = true,
-): Email
-```
-
-| Parameter | Description |
-|-----------|-------------|
-| `$sender` | `Profile` instance — the From address. |
-| `$message_type` | Used to look up `Config::templates` for template + token defaults. Pass `null` to skip Config template lookup entirely (no template, no replaceVars seeding). |
-| `$template` | Explicit override: pass an `int` id, `string` code, or `Template` instance. `null` = use config lookup. |
-| `$driver` | Transport override. `null` = use `Config::get()->driver`. |
-| `$log_body` | `false` → body saved as `***redacted***` in DB (use for OTP / sensitive codes). Email is still delivered correctly. |
-
-### Basic example
+The established API is preserved:
 
 ```php
 use TimeFrontiers\Mailer\Email;
 use TimeFrontiers\Mailer\Profile;
 use TimeFrontiers\Mailer\RecipientType;
+use TimeFrontiers\Mailer\ReplacementValue;
 
-// Resolve a sender profile (find-or-create by address)
-$sender = Profile::resolve($conn, 'hello@example.com', 'Example', 'Team');
+$sender = Profile::resolve($db, 'hello@example.com', 'Example');
 
-// Create a draft — template resolved from Config['default']
 $email = Email::make(
-    $conn,
-    $sender,
-    'Welcome to Example, %{user-name}!',
-    '<p>Hi %{user-name}, thanks for joining.</p>',
-    $currentUserCode,   // platform user code or 'SYSTEM'
-    'default',          // message_type — matches Config::templates key
+    conn: $db,
+    sender: $sender,
+    subject: 'Hello %{name}',
+    body: '<p>Hello %{name}</p>',
 );
 
-// Add recipients (no $conn needed — uses internally stored connection)
-$email->addRecipient('alice@example.com', RecipientType::TO);
-$email->addRecipient(['email' => 'bob@example.com', 'name' => 'Bob'], RecipientType::CC);
-$email->addRecipient('replies@example.com', RecipientType::REPLY_TO);
+$email
+    ->addRecipient('Ada <ada@example.net>');
+$email->addRecipient('team@example.net', RecipientType::CC);
+$email->addRecipient('audit@example.net', RecipientType::BCC);
+$email->addRecipient('support@example.com', RecipientType::REPLY_TO);
 
-// Send — bare-key token map applied to subject + body
-$email->send([
-    'user-name'    => 'Alice',
-    'user-surname' => 'Smith',
+$ok = $email->send([
+    'name' => 'Ada & Grace',
 ]);
+
+$detail = $email->lastDeliveryResult();
 ```
 
-### Token replacements
+`send(): bool` remains the compatibility result. `lastDeliveryResult()` exposes additive per-recipient statuses, provider identifiers, error codes, idempotency keys, unknown outcomes, and accepted/local-reconciliation state.
 
-Tokens in subject and body use the `%{key}` syntax. Pass bare keys (without `%{}`) to `send()`:
+### Recipient semantics and privacy
+
+v1.1 uses the explicit `individual` delivery mode. Every TO, CC, and BCC row receives exactly one independent provider message. CC/BCC lists are not repeated for every TO recipient. A BCC recipient is used in that message's envelope but is removed from the serialized wire headers by Symfony Mailer. Reply-To recipients are headers only and are not dispatched.
+
+All envelope recipients are represented in internal delivery rows and logs. Do not expose BCC delivery data through a user-visible log endpoint.
+
+## Rendering and trust
+
+Replacement keys remain bare keys such as `name`; the renderer applies `%{name}`. Plain strings are HTML-escaped in HTML output. Explicit modes are available:
 
 ```php
-// Body: "<p>Hi %{user-name} %{user-surname},</p>"
-$email->send([
-    'user-name'    => 'Alice',
-    'user-surname' => 'Smith',
-]);
-// Renders: "<p>Hi Alice Smith,</p>"
+$email->replace('summary', ReplacementValue::trustedHtml('<strong>Approved</strong>'));
+$email->replace('portal', ReplacementValue::url('https://example.com/account'));
+$email->replace('display-name', ReplacementValue::header('Ada'));
 ```
 
-Replacements are merged on top of the `replaceVars` defaults seeded from `Config::templates`. Per-call values always win.
+- `trustedHtml()` bypasses HTML escaping and must only contain application-owned content.
+- `url()` accepts absolute HTTP/HTTPS URLs.
+- header replacements reject CR, LF, and NUL.
+- unresolved tokens default to rejection; `preserve` and `empty` are explicit configuration alternatives.
+- per-call values are applied consistently to subject, HTML, and plain text.
+- template and rendered-message sizes are bounded.
 
-### Sensitive content — `$log_body = false`
-
-```php
-// OTP or password-reset email — code must not be stored in the database
-$email = Email::make(
-    $conn, $sender,
-    'Your verification code',
-    '<p>Your code is: <strong>%{otp-code}</strong>. Expires in 10 minutes.</p>',
-    $userCode,
-    'default',
-    null,     // template
-    null,     // driver
-    false,    // log_body — body saved as ***redacted*** in DB
-);
-$email->addRecipient($recipientEmail, RecipientType::TO);
-$email->send(['otp-code' => '123 4567 8']);
-```
-
----
-
-## Templates
-
-Templates are outer HTML shells. The email body is injected via the `%{body}` token at render time. Both `%{body}` (new) and `%{message}` (legacy) are supported for backward compatibility.
-
-```php
-use TimeFrontiers\Mailer\Email\Template;
-
-// Create and persist a new template
-$template = Template::make(
-    $conn,
-    'Default Shell',
-    '<html><body style="font-family:sans-serif">%{body}</body></html>',
-    $userCode,
-);
-
-// Look up an existing template by id or code
-$template = Template::findById(42);           // by int id
-$template = Template::findById('42912345678'); // by string code
-
-// Attach to an email explicitly (overrides Config lookup)
-$email->setTemplate($template);
-```
-
----
+CommonMark conversion is not sanitization. `trustedTemplateHtml: true` allows raw HTML only because persisted templates are assumed to be trusted application content. Set it to false to strip raw HTML; applications accepting untrusted author input still need a dedicated HTML sanitizer and authorisation boundary.
 
 ## Attachments
 
 ```php
 use TimeFrontiers\File\File;
 
-// Persisted — backed by timefrontiers/php-file; row written to email_attachments
-$file = File::load($conn, $fileCode);
-$email->attach($file);
-
-// Transient — raw filesystem path; not stored in email_attachments
-$email->attachRaw('/var/invoices/inv-001.pdf', 'application/pdf', 'Invoice.pdf');
+$storedFile = File::findByCode('583...', $db);
+$email->attach($storedFile);
 ```
 
----
+Persisted attachments are linked immediately and rehydrated when an email is loaded. Queue acceptance also records an ordered attachment-reference snapshot, so later edits to the source email cannot change an accepted job. Workers hydrate that snapshot through php-file's `openReadStream()` contract, so local, S3, and MinIO objects use the same bounded path. Count, individual size, total size, MIME allow-list, stream failure, and metadata-length mismatch are enforced.
 
-## Deferred delivery (OUTBOX queue)
+`attachRaw()` remains available for immediate compatibility sends but is deprecated for durable workflows. A transient filesystem path is rejected at queue time.
+
+## Durable queue
+
+The compatibility email queue API remains:
 
 ```php
-// Move to OUTBOX and create pending EmailLog entries
-$email->queue($conn, $sender, priority: 3);
+$email->queue($db, $sender, priority: 5);
 
-// In your cron / queue runner — load OUTBOX emails and dispatch
-$pending = Email::findBySql(
-    'SELECT * FROM :db:.:tbl: WHERE `folder` = ?', ['outbox']
+// Worker process. The sender argument is retained for source compatibility;
+// persisted sender/driver snapshots are authoritative.
+$delivered = \TimeFrontiers\Mailer\Email\Queue::processNext(
+    conn: $db,
+    sender: $workerCompatibilityProfile,
+    limit: 25,
 );
-foreach ($pending as $e) {
-    $e->send();
-}
 ```
 
----
-
-## Bulk personalized sending — `Email\Queue`
-
-`Email\Queue` is designed for newsletters, campaigns, and any batch send where each recipient receives a personalized copy. The template shell is applied once at queue-creation time; per-recipient token replacements are applied at dispatch time.
+For standalone personalized batches:
 
 ```php
 use TimeFrontiers\Mailer\Email\Queue;
 
-$queue = Queue::make(
-    $conn,
-    $sender,
-    'Hi %{user-name} — your monthly update',
-    '<p>Dear %{user-name} %{user-surname},<br>Here is your update...</p>',
-    'default',    // message_type — resolves template from Config
-);
-
-// Add recipients with their per-recipient token values
-$queue->addRecipient('john@doe.com', [
-    'user-name'    => 'John',
-    'user-surname' => 'Doe',
-]);
-$queue->addRecipient(['name' => 'Jane', 'email' => 'jane@doe.com'], [
-    'user-name'    => 'Jane',
-    'user-surname' => 'Doe',
-]);
-$queue->addRecipient('plain@example.com', []);
-
-// Dispatch immediately
-$sent = $queue->dispatch();   // returns count of successfully sent recipients
-
-// — or — leave as 'pending' and let the cron runner handle it
-Queue::processNext($conn, $sender, limit: 50);
+$queue = Queue::make($db, $sender, 'Welcome %{name}', '<p>Hello %{name}</p>');
+$queue->addRecipient('ada@example.net', ['name' => 'Ada']);
+$queue->addRecipient('grace@example.net', ['name' => 'Grace']);
+$queue->enqueue();
 ```
 
-Queue recipients are **not** persisted to `email_recipients` — they are stored as JSON inside `email_queue.recipients`. This keeps the queue lightweight for large batches.
+Queue guarantees:
 
----
+- a conditional update atomically claims one eligible row;
+- an exact affected-row count of one is required;
+- claims contain a worker ID, lease expiry, and attempt number;
+- workers renew and verify lease ownership immediately before each provider call, while recovery first takes over an expired lease atomically;
+- expired leases are recovered with bounded exponential backoff;
+- retry exhaustion becomes `dead_letter`;
+- recipients have normalized independent statuses and retry schedules;
+- delivery attempts are committed before provider dispatch;
+- idempotency keys are stable per logical recipient;
+- provider acceptance is recorded before logging or folder projection;
+- a prepared/unknown request is quarantined as `reconciliation`, never selected as an ordinary retry;
+- successful and failed recipients produce `partial` or `partial_dead_letter`, not a false all-sent state;
+- driver configuration and sender identity are snapshotted when work is created.
+- queued subject, rendered bodies, Reply-To headers, recipient rows, and attachment references are accepted atomically with the email's outbox transition.
 
-## Delivery log
+Built-in Symfony SMTP and Mailgun transports do not expose an idempotency header. Their interrupted request is therefore classified as unknown and requires review. Injected providers may implement `IdempotentMailDriverInterface` to receive the stable key.
 
-Each `send()` creates one `EmailLog` row per TO recipient:
+### Redacted bodies
 
-```php
-use TimeFrontiers\Mailer\Log\EmailLog;
+An email created with `log_body: false` cannot be queued or reloaded for delivery because the stored body is `***redacted***`. This package does not claim to provide an encrypted payload store. Add such a store as a separately reviewed feature before enabling durable redacted messages.
 
-$log = EmailLog::loadById($conn, $logId);
-$log->markRead();   // recipient opened the email
-```
+## Mailing lists
 
----
+Public mailing-list code prefix `218` and email code prefix `421` remain unchanged. v1.1 moves standing membership to `mailing_list_members`, whose non-null `mailing_list_id` makes `UNIQUE(mailing_list_id,address,type)` effective. Per-email recipients remain in `email_recipients`.
 
-## Folder states
+## Error boundary
 
-| Value | Constant | Description |
-|-------|----------|-------------|
-| `draft` | `Folder::DRAFT` | Not yet queued or sent |
-| `outbox` | `Folder::OUTBOX` | Queued for deferred delivery |
-| `sent` | `Folder::SENT` | All recipients dispatched |
+Mailer entities continue to expose canonical `HasErrors` data. Public errors use stable, non-sensitive messages such as `transport_outcome_unknown` and never include raw SMTP/provider exceptions or a complete DSN. Consumers may install `timefrontiers/php-instance-error` for rank-aware extraction.
 
----
-
-## Adding a new driver
-
-1. Create a typed config class implementing `DriverConfigInterface`:
-
-```php
-final class SendGridConfig implements DriverConfigInterface {
-    public function __construct(public readonly string $apiKey) {}
-    public function driverName(): string { return 'sendgrid'; }
-    public function toDsn(): string { return "sendgrid+api://{$this->apiKey}@default"; }
-}
-```
-
-2. Create the driver class implementing `MailDriverInterface`.
-3. Add one arm to `DriverFactory::fromConfig()`.
-
----
-
-## Code prefixes
-
-| Entity       | Prefix | Example            |
-|--------------|--------|--------------------|
-| Email        | `421`  | `421394827163058`  |
-| Template     | `429`  | `429847392016453`  |
-| Mailing list | `218`  | `218736402918374`  |
-
----
-
-## Migration
-
-Run the migration script inside the database that holds your existing tables:
+## Quality checks
 
 ```bash
-mysql -u root -p your_database < schema/migrate_lnk_to_tf.sql
+composer lint
+composer test-unit
+composer test-integration
+composer analyse
+composer check
 ```
 
-What the migration does, in order:
-- Adds `id BIGINT UNSIGNED AUTO_INCREMENT` PK to `emails`, `email_templates`, and `mailing_lists` (which used `code CHAR(14)` as PK); sequential ids are back-filled before the PK swap
-- Widens `code` from `CHAR(14)` to `CHAR(15)` across all tables
-- Renames `mailing_lists.title` → `name`; drops `description`
-- Adds `_updated` to `email_templates` and `mailing_lists`
-- Migrates `email_recipients`: replaces char-code columns `email` / `mlist` with integer FK columns `email_id` / `mlist_id`; back-fills via JOIN; tightens `type` to ENUM
-- Migrates `email_attachments`: replaces `email` (code) with `email_id` (int FK); renames `fid` → `file_id`
-- Migrates `email_log`: replaces `email` (code) with `email_id` (int FK); renames `sender` → `sender_id` and `recipient` → `recipient_id`
-- Adds `is_md`, `template_id`, `sender_id` to `emails`; back-fills `template_id`; drops `template`, `header`, `origin`, `replace_pattern`, `thread`
+Integration tests require `MAILER_TEST_HOST`, `MAILER_TEST_USER`, `MAILER_TEST_PASSWORD`, and optionally `MAILER_TEST_PORT`. They create and remove only randomly named databases matching `php_mailer_<pid>_<random>_test`. CI provisions MySQL and exercises MySQLi and PDO against the same queue.
 
----
+The suite skips only when the host or user variables are absent. Once database variables are supplied, connection, schema, or authentication failures fail the suite so CI cannot silently pass without integration coverage.
 
-## License
+## Release policy
 
-MIT — see [LICENSE](LICENSE).
+Do not create or move a `v1.1.0` tag until an independent audit verifies:
+
+- concurrent claim behavior on both adapters;
+- lease recovery and dead-letter handling;
+- provider-accepted/local-failure reconciliation;
+- partial-recipient retry and stable idempotency keys;
+- redacted-body rejection and attachment reload/stream behavior;
+- the migration and rollback runbook;
+- a clean `composer check` with the integration suite actually executed.
+
+Use [`INDEPENDENT-AUDIT.md`](INDEPENDENT-AUDIT.md) as the audit record and release checklist. A local `composer check` that reports skipped integration tests is not release evidence.
+
+License: MIT. See [`LICENSE`](LICENSE).

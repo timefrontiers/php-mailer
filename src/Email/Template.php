@@ -10,6 +10,7 @@ use TimeFrontiers\Data\Random;
 use TimeFrontiers\Validation\Validator;
 use TimeFrontiers\Mailer\Config;
 use TimeFrontiers\Mailer\Exception\ValidationException;
+use TimeFrontiers\Mailer\Persistence\DatabaseGateway;
 
 /**
  * Email template stored in `email_templates`.
@@ -22,11 +23,11 @@ use TimeFrontiers\Mailer\Exception\ValidationException;
  * PK:      id (BIGINT UNSIGNED AUTO_INCREMENT)
  * Unique:  code CHAR(15) — prefix 429, 12 random digits
  */
+/** @phpstan-consistent-constructor */
 class Template
 {
   use \TimeFrontiers\Helper\DatabaseObject,
-      \TimeFrontiers\Helper\Pagination,
-      \TimeFrontiers\Helper\HasErrors;
+      \TimeFrontiers\Helper\Pagination;
 
   public const CODE_PREFIX  = '429';
   public const CODE_LENGTH  = 15;
@@ -35,6 +36,7 @@ class Template
   protected static string $_primary_key = 'id';
   protected static string $_db_name     = '';
   protected static string $_table_name  = 'email_templates';
+  /** @var list<string> */
   protected static array  $_db_fields   = [
     'id', 'code', 'user', 'title', 'body', 'is_md', '_author', '_created', '_updated',
   ];
@@ -83,6 +85,10 @@ class Template
   ): self {
     $instance = new self($conn);
 
+    if (strlen($body) > Config::get()->maxTemplateBytes) {
+      throw new ValidationException('Template exceeds the configured size limit.');
+    }
+
     $instance->title = Validator::field('title', $title)->text(min: 5, max: 128)->value()
       ?: throw new ValidationException("Template title must be 5-128 characters.");
 
@@ -99,7 +105,7 @@ class Template
       throw new \RuntimeException("Template::make() — failed to persist template.");
     }
 
-    $instance->id = (int) $instance->conn()->insertId();
+    $instance->id = (int) DatabaseGateway::insertId($instance->conn());
     return $instance;
   }
 
@@ -113,10 +119,13 @@ class Template
       return null;
     }
     $found = self::findBySql(
-      'SELECT * FROM :db:.:tbl: WHERE `code` = ? LIMIT 1',
+      'SELECT `id`,`code`,`user`,`title`,`body`,`is_md`,`_author`,`_created`,`_updated` FROM :db:.:tbl: WHERE `code` = ? LIMIT 1',
       [$code],
     );
-    return $found ? $found[0] : null;
+    if ($found === false) {
+      throw new \RuntimeException('Template lookup failed.');
+    }
+    return $found === [] ? null : $found[0];
   }
 
   // -------------------------------------------------------------------------
@@ -132,10 +141,16 @@ class Template
     if (empty($this->body)) {
       return '';
     }
+    if (strlen($this->body) > Config::get()->maxTemplateBytes) {
+      throw new ValidationException('Template exceeds the configured size limit.');
+    }
     $raw = html_entity_decode($this->body);
     if ($this->is_md) {
-      $converter = new CommonMarkConverter(['html_input' => 'allow']);
-      return (string) $converter->convert($raw);
+      $converter = new CommonMarkConverter(['html_input' => Config::get()->trustedTemplateHtml ? 'allow' : 'strip']);
+      $raw = (string) $converter->convert($raw);
+    }
+    if (strlen($raw) > Config::get()->maxRenderedBytes) {
+      throw new ValidationException('Rendered template exceeds the configured size limit.');
     }
     return $raw;
   }
@@ -167,11 +182,13 @@ class Template
   // DatabaseObject override
   // -------------------------------------------------------------------------
 
-  public static function _instantiateFromRow(array $row): static
+  /** @param array<string,mixed> $row */
+  public static function _instantiateFromRow(array $row, ?SQLDatabase $conn = null): static
   {
-    $instance = new static();
-    foreach ($row as $key => $value) {
-      if (!is_int($key) && property_exists($instance, $key)) {
+    $instance = $conn === null ? new static() : new static($conn);
+    foreach (static::$_db_fields as $key) {
+      if (array_key_exists($key, $row) && property_exists($instance, $key)) {
+        $value = $row[$key];
         // MySQL returns TINYINT(1) booleans as int — cast to the correct type
         $instance->$key = match ($key) {
           'is_md' => (bool)$value,
