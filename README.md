@@ -17,10 +17,11 @@ The package retains `HasErrors` through Database Object. `timefrontiers/php-inst
 ## Installation and database
 
 ```bash
-composer require timefrontiers/php-mailer:^1.1.1
+composer require timefrontiers/php-mailer:^1.1.2
 ```
 
-The 1.1 line starts at `1.1.1`; `1.1.0` was never tagged.
+The 1.1 line starts at `1.1.1`; `1.1.0` was never tagged. Use `^1.1.2` or
+later: `1.1.1` shipped a migration that only runs on MariaDB.
 
 For a fresh installation, apply [`schema/schema.sql`](schema/schema.sql). Existing 1.0 installations must follow [`UPGRADING.md`](UPGRADING.md) and apply [`schema/migrations/1.1.0.sql`](schema/migrations/1.1.0.sql) while old workers are stopped.
 

@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.1.2 — 2026-08-18
+
+### Fixed
+
+- **The 1.1 migration could not run on MySQL at all.**
+  `schema/migrations/1.1.0.sql` used `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
+  in 19 places. That clause is a MariaDB extension; MySQL rejects it with a
+  parse error, so `1.1.1` would have failed on the first statement against
+  every MySQL installation. Every local gate ran on MariaDB, which accepts
+  both forms, so this only surfaced on the MySQL 8.4 CI job.
+
+  The columns are now added through a `mailer_add_column_v110` helper that
+  checks `information_schema` and issues a plain `ADD COLUMN` — the same
+  portable pattern the file already used for indexes. Idempotency is
+  unchanged and the migration still re-runs cleanly.
+
+### Added
+
+- `SchemaPortabilityTest`, a database-free guard that fails `composer check`
+  if any shipped SQL file uses MariaDB-only `ALTER TABLE` syntax. It covers
+  `schema/schema.sql`, `schema/1.0/schema.sql`, and every migration, and
+  asserts its own detector matches the syntax it guards against. Verified to
+  flag all 19 occurrences in the `1.1.1` migration.
+
 ## 1.1.1 — 2026-08-18
 
 First release of the 1.1 line. `1.1.0` was prepared but never tagged: an

@@ -2,12 +2,38 @@
 -- Idempotent for MySQL 8.0.29+ and MariaDB 10.6+.
 -- Take a verified backup and stop v1.0 workers before applying.
 
-ALTER TABLE `emails`
-  ADD COLUMN IF NOT EXISTS `sender_snapshot` JSON DEFAULT NULL AFTER `sender_id`,
-  ADD COLUMN IF NOT EXISTS `driver` VARCHAR(64) DEFAULT NULL AFTER `sender_snapshot`,
-  ADD COLUMN IF NOT EXISTS `driver_config` JSON DEFAULT NULL AFTER `driver`,
-  ADD COLUMN IF NOT EXISTS `delivery_mode` VARCHAR(32) NOT NULL DEFAULT 'individual' AFTER `driver_config`,
-  ADD COLUMN IF NOT EXISTS `log_body` TINYINT(1) NOT NULL DEFAULT 1 AFTER `delivery_mode`;
+-- `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` is MariaDB-only syntax; MySQL
+-- rejects it outright. This helper gives the same idempotency on both engines
+-- by checking information_schema before issuing a plain ADD COLUMN, matching
+-- the pattern already used for indexes lower down.
+DELIMITER //
+DROP PROCEDURE IF EXISTS `mailer_add_column_v110`//
+CREATE PROCEDURE `mailer_add_column_v110`(
+  IN `p_table` VARCHAR(64),
+  IN `p_column` VARCHAR(64),
+  IN `p_definition` TEXT
+)
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = DATABASE()
+      AND table_name = `p_table`
+      AND column_name = `p_column`
+  ) THEN
+    SET @mailer_add_column_sql = CONCAT(
+      'ALTER TABLE `', `p_table`, '` ADD COLUMN `', `p_column`, '` ', `p_definition`
+    );
+    PREPARE mailer_add_column_stmt FROM @mailer_add_column_sql;
+    EXECUTE mailer_add_column_stmt;
+    DEALLOCATE PREPARE mailer_add_column_stmt;
+  END IF;
+END//
+DELIMITER ;
+CALL `mailer_add_column_v110`('emails', 'sender_snapshot', 'JSON DEFAULT NULL AFTER `sender_id`');
+CALL `mailer_add_column_v110`('emails', 'driver', 'VARCHAR(64) DEFAULT NULL AFTER `sender_snapshot`');
+CALL `mailer_add_column_v110`('emails', 'driver_config', 'JSON DEFAULT NULL AFTER `driver`');
+CALL `mailer_add_column_v110`('emails', 'delivery_mode', 'VARCHAR(32) NOT NULL DEFAULT ''individual'' AFTER `driver_config`');
+CALL `mailer_add_column_v110`('emails', 'log_body', 'TINYINT(1) NOT NULL DEFAULT 1 AFTER `delivery_mode`');
 
 UPDATE `emails` `e`
 LEFT JOIN `mailer_profiles` `p` ON `p`.`id`=`e`.`sender_id`
@@ -59,21 +85,22 @@ DELETE FROM `email_recipients` WHERE `email_id` IS NULL;
 ALTER TABLE `email_recipients` MODIFY COLUMN `email_id` BIGINT UNSIGNED NOT NULL;
 
 ALTER TABLE `email_queue`
-  MODIFY COLUMN `status` VARCHAR(32) NOT NULL DEFAULT 'building',
-  ADD COLUMN IF NOT EXISTS `email_id` BIGINT UNSIGNED DEFAULT NULL AFTER `id`,
-  ADD COLUMN IF NOT EXISTS `sender_snapshot` JSON DEFAULT NULL AFTER `sender_id`,
-  ADD COLUMN IF NOT EXISTS `body_text` MEDIUMTEXT DEFAULT NULL AFTER `body`,
-  ADD COLUMN IF NOT EXISTS `headers` JSON DEFAULT NULL AFTER `body_text`,
-  ADD COLUMN IF NOT EXISTS `driver_config` JSON DEFAULT NULL AFTER `driver`,
-  ADD COLUMN IF NOT EXISTS `delivery_mode` VARCHAR(32) NOT NULL DEFAULT 'individual' AFTER `driver_config`,
-  ADD COLUMN IF NOT EXISTS `priority` TINYINT UNSIGNED NOT NULL DEFAULT 5 AFTER `delivery_mode`,
-  ADD COLUMN IF NOT EXISTS `worker_id` VARCHAR(128) DEFAULT NULL AFTER `priority`,
-  ADD COLUMN IF NOT EXISTS `lease_expires_at` DATETIME DEFAULT NULL AFTER `worker_id`,
-  ADD COLUMN IF NOT EXISTS `attempts` SMALLINT UNSIGNED NOT NULL DEFAULT 0 AFTER `lease_expires_at`,
-  ADD COLUMN IF NOT EXISTS `max_attempts` SMALLINT UNSIGNED NOT NULL DEFAULT 5 AFTER `attempts`,
-  ADD COLUMN IF NOT EXISTS `next_attempt_at` DATETIME DEFAULT NULL AFTER `max_attempts`,
-  ADD COLUMN IF NOT EXISTS `last_error_code` VARCHAR(128) DEFAULT NULL AFTER `next_attempt_at`,
-  ADD COLUMN IF NOT EXISTS `reconciliation_required` TINYINT(1) NOT NULL DEFAULT 0 AFTER `last_error_code`;
+  MODIFY COLUMN `status` VARCHAR(32) NOT NULL DEFAULT 'building';
+
+CALL `mailer_add_column_v110`('email_queue', 'email_id', 'BIGINT UNSIGNED DEFAULT NULL AFTER `id`');
+CALL `mailer_add_column_v110`('email_queue', 'sender_snapshot', 'JSON DEFAULT NULL AFTER `sender_id`');
+CALL `mailer_add_column_v110`('email_queue', 'body_text', 'MEDIUMTEXT DEFAULT NULL AFTER `body`');
+CALL `mailer_add_column_v110`('email_queue', 'headers', 'JSON DEFAULT NULL AFTER `body_text`');
+CALL `mailer_add_column_v110`('email_queue', 'driver_config', 'JSON DEFAULT NULL AFTER `driver`');
+CALL `mailer_add_column_v110`('email_queue', 'delivery_mode', 'VARCHAR(32) NOT NULL DEFAULT ''individual'' AFTER `driver_config`');
+CALL `mailer_add_column_v110`('email_queue', 'priority', 'TINYINT UNSIGNED NOT NULL DEFAULT 5 AFTER `delivery_mode`');
+CALL `mailer_add_column_v110`('email_queue', 'worker_id', 'VARCHAR(128) DEFAULT NULL AFTER `priority`');
+CALL `mailer_add_column_v110`('email_queue', 'lease_expires_at', 'DATETIME DEFAULT NULL AFTER `worker_id`');
+CALL `mailer_add_column_v110`('email_queue', 'attempts', 'SMALLINT UNSIGNED NOT NULL DEFAULT 0 AFTER `lease_expires_at`');
+CALL `mailer_add_column_v110`('email_queue', 'max_attempts', 'SMALLINT UNSIGNED NOT NULL DEFAULT 5 AFTER `attempts`');
+CALL `mailer_add_column_v110`('email_queue', 'next_attempt_at', 'DATETIME DEFAULT NULL AFTER `max_attempts`');
+CALL `mailer_add_column_v110`('email_queue', 'last_error_code', 'VARCHAR(128) DEFAULT NULL AFTER `next_attempt_at`');
+CALL `mailer_add_column_v110`('email_queue', 'reconciliation_required', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER `last_error_code`');
 
 UPDATE `email_queue` `q`
 LEFT JOIN `mailer_profiles` `p` ON `p`.`id`=`q`.`sender_id`
@@ -291,3 +318,5 @@ END//
 CALL `mailer_add_v110_indexes`()//
 DROP PROCEDURE `mailer_add_v110_indexes`//
 DELIMITER ;
+
+DROP PROCEDURE IF EXISTS `mailer_add_column_v110`;

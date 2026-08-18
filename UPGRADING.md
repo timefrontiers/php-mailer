@@ -3,8 +3,9 @@
 This migration was independently audited and accepted before release. See
 `dev/php-mailer-v1.1-audit.md` in the Linktude workspace for the full record.
 
-This package releases the 1.1 line as **`1.1.1`**; `1.1.0` was never tagged.
-Require `^1.1.1`.
+This package releases the 1.1 line starting at **`1.1.1`**; `1.1.0` was never
+tagged. **Require `^1.1.2`** — the `1.1.1` migration used MariaDB-only
+`ADD COLUMN IF NOT EXISTS` and fails to parse on MySQL.
 
 ## Before migration
 
